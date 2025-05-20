@@ -13,7 +13,8 @@ import json
 import time
 
 from src.ldm.vae.model import Model_VAE, Encoder_model, Decoder_model
-from src.data.dataset import preprocess, TabularDataset  
+from src.data.dataset import split_numerical_categorical
+from src.data.dataset import TabularDataset, preprocess_data
 
 warnings.filterwarnings('ignore')
 
@@ -27,6 +28,16 @@ N_HEAD = 1
 FACTOR = 32
 NUM_LAYERS = 2
 
+
+def get_categories(X_train_cat):
+    return (
+        None
+        if X_train_cat is None
+        else [
+            len(set(X_train_cat[:, i]))
+            for i in range(X_train_cat.shape[1])
+        ]
+    )
 
 def compute_loss(X_num, X_cat, Recon_X_num, Recon_X_cat, mu_z, logvar_z):
     ce_loss_fn = nn.CrossEntropyLoss()
@@ -53,8 +64,8 @@ def compute_loss(X_num, X_cat, Recon_X_num, Recon_X_cat, mu_z, logvar_z):
 
 
 def main(args):
-    info_path = args.info_path
-    data_dir = f'data/{dataname}'
+   
+
 
     max_beta = args.max_beta
     min_beta = args.min_beta
@@ -74,29 +85,39 @@ def main(args):
     encoder_save_path = f'{ckpt_dir}/encoder.pt'
     decoder_save_path = f'{ckpt_dir}/decoder.pt'
 
-    X_num, X_cat, categories, d_numerical = preprocess(data_dir, task_type=info['task_type'])
+    df_wrangled = pd.read_csv(args.data_path)
+    num_mat, cat_mat, mapping = split_numerical_categorical(df_wrangled, cardinality_threshold=7)
 
-    X_train_num, _ = X_num
-    X_train_cat, _ = X_cat
+    num_mat = num_mat.astype(np.float32)
+    cat_mat = cat_mat.astype(np.int64)
 
-    X_train_num, X_test_num = X_num
-    X_train_cat, X_test_cat = X_cat
+    categories = get_categories(cat_mat)
+    d_numerical = num_mat.shape[1]
 
-    X_train_num, X_test_num = torch.tensor(X_train_num).float(), torch.tensor(X_test_num).float()
-    X_train_cat, X_test_cat =  torch.tensor(X_train_cat), torch.tensor(X_test_cat)
+    preprocessed_data = preprocess_data(num_mat=num_mat, cat_mat=cat_mat, y=None, mapping=mapping,
+        test_size=0.25, transform=False, scaling_strategy=None, cat_encoding=None)
+
+    data_train = preprocessed_data.X_train
+    data_test = preprocessed_data.X_test
+    
+    dataset_train = TabularDataset(data_train)
+    dataset_test = TabularDataset(data_test)
 
 
-    train_data = TabularDataset(X_train_num.float(), X_train_cat)
+    batch_size = 256
 
-    X_test_num = X_test_num.float().to(device)
-    X_test_cat = X_test_cat.to(device)
-
-    batch_size = 4096
     train_loader = DataLoader(
-        train_data,
+        dataset_train,
         batch_size = batch_size,
         shuffle = True,
-        num_workers = 4,
+        num_workers = 0,
+    )
+
+    test_loader = DataLoader(
+        dataset_test,
+        batch_size = batch_size,
+        shuffle = False,
+        num_workers = 0,
     )
 
     model = Model_VAE(NUM_LAYERS, d_numerical, categories, D_TOKEN, n_head = N_HEAD, factor = FACTOR, bias = True)
@@ -210,10 +231,9 @@ def main(args):
         print('Successfully save pretrained embeddings in disk!')
 
 if __name__ == '__main__':
-
     parser = argparse.ArgumentParser(description='Variational Autoencoder')
 
-    parser.add_argument('--info_path', type=str, default='/home/andrii/Documents/FondaMental-AI/synth-data-psy/FACE/neuropsy_bp_partial_n_cols_60.json', help='Name of dataset.')
+    parser.add_argument('--data_path', type=str, default='/home/andrii/Documents/FondaMental-AI/synth-data-psy/FACE/neuropsy_bp_partial_n_cols_60.csv', help='Path to dataset.')
     parser.add_argument('--gpu', type=int, default=0, help='GPU index.')
     parser.add_argument('--max_beta', type=float, default=1e-2, help='Initial Beta.')
     parser.add_argument('--min_beta', type=float, default=1e-5, help='Minimum Beta.')
@@ -226,3 +246,5 @@ if __name__ == '__main__':
         args.device = 'cuda:{}'.format(args.gpu)
     else:
         args.device = 'cpu'
+    
+    main(args)
