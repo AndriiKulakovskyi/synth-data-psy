@@ -1,64 +1,327 @@
+from __future__ import annotations
+import torch
 import numpy as np
-import os
-
-# from src import tools
+import pandas as pd
+from dataclasses import dataclass
 from torch.utils.data import Dataset
+from typing import Dict, Any, Optional, Tuple, Literal
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import (
+    StandardScaler,
+    MinMaxScaler,
+    QuantileTransformer,
+    OneHotEncoder,
+    OrdinalEncoder,
+)
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+
+
+ScalerStrategy = Literal["standard", "minmax", "quantile", None]
+CatEncoding    = Literal["onehot", "ordinal", None]
+
+
+def _make_scaler(strategy: ScalerStrategy):
+    if strategy == "standard":
+        return StandardScaler()
+    if strategy == "minmax":
+        return MinMaxScaler()
+    if strategy == "quantile":
+        return QuantileTransformer(
+            n_quantiles=1000, output_distribution="normal", random_state=0
+        )
+    if strategy is None:
+        return None
+    raise ValueError(f"Unknown scaling strategy: {strategy!r}")
+
+
+def _make_encoder(encoding: CatEncoding):
+    if encoding == "onehot":
+        return OneHotEncoder(
+            sparse=False, handle_unknown="ignore", dtype=np.float32
+        )
+    if encoding == "ordinal":
+        return OrdinalEncoder(
+            handle_unknown="use_encoded_value", unknown_value=-1
+        )
+    if encoding is None:
+        return None
+    raise ValueError(f"Unknown cat_encoding: {encoding!r}")
+
+
+@dataclass
+class PreprocessedData:
+    X_train: np.ndarray
+    X_test:  np.ndarray
+    y_train: Optional[np.ndarray]
+    y_test:  Optional[np.ndarray]
+    scaler:  Optional[Any]
+    encoder: Optional[Any]
+    mapping: Dict[str, Any]
+    train_dataset:  TabularDataset
+    test_dataset:   TabularDataset
 
 
 class TabularDataset(Dataset):
-    def __init__(self, X_num, X_cat):
-        self.X_num = X_num
-        self.X_cat = X_cat
+    def __init__(
+        self,
+        X_num: np.ndarray,
+        X_cat: np.ndarray,
+        y: Optional[Union[np.ndarray, pd.Series]] = None,
+    ):
+        """
+        PyTorch Dataset wrapping numeric + categorical features,
+        with optional labels y.
+        """
+        if X_num.shape[0] != X_cat.shape[0]:
+            raise ValueError("X_num and X_cat must have the same number of rows")
+        if y is not None:
+            y_arr = np.asarray(y)
+            if y_arr.shape[0] != X_num.shape[0]:
+                raise ValueError("y must have the same length as X_num / X_cat")
+            self.y = torch.from_numpy(y_arr)
+        else:
+            self.y = None
 
-    def __getitem__(self, index):
-        this_num = self.X_num[index]
-        this_cat = self.X_cat[index]
+        self.X_num = torch.from_numpy(X_num).float()
+        # categorical indices or one-hot floats
+        self.X_cat = (
+            torch.from_numpy(X_cat).long()
+            if np.issubdtype(X_cat.dtype, np.integer)
+            else torch.from_numpy(X_cat).float()
+        )
 
-        sample = (this_num, this_cat)
+    def __getitem__(self, idx: int):
+        if self.y is not None:
+            return self.X_num[idx], self.X_cat[idx], self.y[idx]
+        return self.X_num[idx], self.X_cat[idx]
 
-        return sample
-
-    def __len__(self):
+    def __len__(self) -> int:
         return self.X_num.shape[0]
 
-def preprocess(dataset_path, task_type = 'binclass', inverse = False, cat_encoding = None, concat = True):
-    
-    T_dict = {}
 
-    T_dict['normalization'] = "quantile"
-    T_dict['num_nan_policy'] = 'mean'
-    T_dict['cat_nan_policy'] =  None
-    T_dict['cat_min_frequency'] = None
-    T_dict['cat_encoding'] = cat_encoding
-    T_dict['y_policy'] = "default"
+def split_numerical_categorical(df: pd.DataFrame,
+                                cardinality_threshold: int = 10) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """
+    Split a DataFrame into numeric & categorical matrices.
 
-    T = tools.data.Transformations(**T_dict)
+    Args:
+        df: Input DataFrame.
+        cardinality_threshold: 
+            If a numeric column has <= this many distinct values,
+            it will be treated as categorical.
 
-    dataset = make_dataset(data_path=dataset_path, T=T, task_type=task_type, change_val=False, concat=concat)
+    Returns:
+        numerical_matrix: shape (n_rows, n_numeric_cols)
+        categorical_matrix: shape (n_rows, n_categorical_cols)
+        mapping: {
+            "numerical": { new_col_idx: original_col_name, … },
+            "categorical": { new_col_idx: original_col_name, … },
+            "original_order": [col1, col2, …],
+            "index": df.index
+        }
 
-    if cat_encoding is None:
-        X_num = dataset.X_num
-        X_cat = dataset.X_cat
+    Raises:
+        TypeError, ValueError on bad inputs.
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("`df` must be a pandas DataFrame")
+    if not isinstance(cardinality_threshold, int) or cardinality_threshold < 0:
+        raise ValueError("`cardinality_threshold` must be a non-negative int")
 
-        X_train_num, X_test_num = X_num['train'], X_num['test']
-        X_train_cat, X_test_cat = X_cat['train'], X_cat['test']
-        
-        categories = tools.data.get_categories(X_train_cat)
-        d_numerical = X_train_num.shape[1]
+    numerical_cols: List[str]   = []
+    categorical_cols: List[str] = []
 
-        X_num = (X_train_num, X_test_num)
-        X_cat = (X_train_cat, X_test_cat)
-
-
-        if inverse:
-            num_inverse = dataset.num_transform.inverse_transform
-            cat_inverse = dataset.cat_transform.inverse_transform
-
-            return X_num, X_cat, categories, d_numerical, num_inverse, cat_inverse
+    # decide for each column
+    for col in df.columns:
+        ser = df[col]
+        if pd.api.types.is_numeric_dtype(ser):
+            if ser.nunique(dropna=True) <= cardinality_threshold:
+                categorical_cols.append(col)
+            else:
+                numerical_cols.append(col)
         else:
-            return X_num, X_cat, categories, d_numerical
+            categorical_cols.append(col)
+
+    # build matrices
+    numerical_matrix   = df[numerical_cols].to_numpy()
+    categorical_matrix = df[categorical_cols].to_numpy()
+
+    # build mapping new_idx → name
+    num_map = {i: name for i, name in enumerate(numerical_cols)}
+    cat_map = {i: name for i, name in enumerate(categorical_cols)}
+
+    mapping: Dict[str, Any] = {
+        "numerical":    num_map,
+        "categorical":  cat_map,
+        "original_order": list(df.columns),
+        "index":        df.index
+    }
+
+    return numerical_matrix, categorical_matrix, mapping
+
+
+def reconstruct_dataframe(
+    numerical_matrix: np.ndarray,
+    categorical_matrix: np.ndarray,
+    mapping: Dict[str, Any],
+    dtype_map: Optional[Dict[str, Any]] = None
+) -> pd.DataFrame:
+    """
+    Rebuild the original DataFrame from two NumPy matrices + mapping.
+
+    Args:
+        numerical_matrix:    as returned by split_numerical_categorical
+        categorical_matrix:  likewise
+        mapping:             the dict returned by split_numerical_categorical
+        dtype_map:           optional {col_name: dtype} to cast columns back
+
+    Returns:
+        DataFrame identical in shape, column order, and index to the original.
+    """
+    # basic checks
+    if not isinstance(mapping, dict):
+        raise TypeError("mapping must be the dict returned by split_numerical_categorical")
+    orig_order = mapping.get("original_order")
+    orig_index = mapping.get("index")
+    num_map    = mapping.get("numerical")
+    cat_map    = mapping.get("categorical")
+
+    # rebuild
+    df = pd.DataFrame(index=orig_index)
+
+    # place numericals
+    for new_idx, name in num_map.items():
+        df[name] = numerical_matrix[:, new_idx]
+
+    # place categoricals
+    for new_idx, name in cat_map.items():
+        df[name] = categorical_matrix[:, new_idx]
+
+    # re‐order to original
+    df = df[orig_order]
+
+    # recast dtypes if requested
+    if dtype_map:
+        for col, dt in dtype_map.items():
+            df[col] = df[col].astype(dt)
+
+    return df
+
+
+def preprocess_data(
+    *,
+    num_mat: np.ndarray,
+    cat_mat: np.ndarray,
+    mapping: Dict[str, Any],
+    y: Optional[Union[np.ndarray, pd.Series]] = None,
+    test_size: float                  = 0.2,
+    random_state: int | None          = 42,
+    transform: bool                   = True,
+    scaling_strategy: ScalerStrategy  = "standard",
+    cat_encoding:   CatEncoding       = "onehot",
+    num_imputer_strategy: str         = "median",
+    cat_imputer_strategy: str         = "most_frequent",
+    stratify: bool                    = True,
+) -> PreprocessedData:
+    """
+    Splits, (optionally) transforms, and wraps into PyTorch Datasets.
+    Supports y=None for unsupervised use.
+
+    Returns:
+        PreprocessedData with raw & transformed arrays, fitted scaler/encoder (or None),
+        the original mapping, and PyTorch train/test datasets.
+    """
+    # ─── basic checks ──────────────────────────────────────────────────────────
+    if not isinstance(num_mat, np.ndarray) or not isinstance(cat_mat, np.ndarray):
+        raise TypeError("num_mat and cat_mat must be NumPy arrays")
+    if num_mat.shape[0] != cat_mat.shape[0]:
+        raise ValueError("num_mat and cat_mat must have same n_rows")
+    if y is not None:
+        y_arr = np.asarray(y)
+        if y_arr.shape[0] != num_mat.shape[0]:
+            raise ValueError("y length must match num_mat rows")
     else:
-        return dataset
+        y_arr = None
+
+    # ─── train/test split ─────────────────────────────────────────────────────
+    stratify_arg = None
+    if y_arr is not None and stratify and np.unique(y_arr).size > 1:
+        stratify_arg = y_arr
+
+    if y_arr is not None:
+        split = train_test_split(
+            num_mat, cat_mat, y_arr,
+            test_size=test_size,
+            random_state=random_state,
+            stratify=stratify_arg,
+        )
+        num_train, num_test, cat_train, cat_test, y_train, y_test = split
+    else:
+        split = train_test_split(
+            num_mat, cat_mat,
+            test_size=test_size,
+            random_state=random_state,
+        )
+        num_train, num_test, cat_train, cat_test = split
+        y_train = y_test = None
+
+    # ─── fast path: raw split without transforms ────────────────────────────────
+    if not transform:
+        X_train = np.hstack([num_train, cat_train])
+        X_test  = np.hstack([num_test,  cat_test])
+        train_ds = TabularDataset(num_train, cat_train, y_train)
+        test_ds  = TabularDataset(num_test,  cat_test,  y_test)
+        return PreprocessedData(
+            X_train=X_train,
+            X_test=X_test,
+            y_train=y_train,
+            y_test=y_test,
+            scaler=None,
+            encoder=None,
+            mapping=mapping,
+            train_dataset=train_ds,
+            test_dataset=test_ds,
+        )
+
+    # ─── build & fit transformation pipelines ─────────────────────────────────
+    # numeric pipeline
+    num_steps = [("imputer", SimpleImputer(strategy=num_imputer_strategy))]
+    scaler = _make_scaler(scaling_strategy)
+    if scaler is not None:
+        num_steps.append(("scaler", scaler))
+    num_pipe = Pipeline(num_steps)
+
+    # categorical pipeline
+    cat_steps = [("imputer", SimpleImputer(strategy=cat_imputer_strategy))]
+    encoder = _make_encoder(cat_encoding)
+    if encoder is not None:
+        cat_steps.append(("encoder", encoder))
+    cat_pipe = Pipeline(cat_steps)
+
+    # fit/transform
+    num_train_p = num_pipe.fit_transform(num_train)
+    num_test_p  = num_pipe.transform(num_test)
+    cat_train_p = cat_pipe.fit_transform(cat_train)
+    cat_test_p  = cat_pipe.transform(cat_test)
+
+    # ─── combine & wrap into PyTorch datasets ─────────────────────────────────
+    X_train = np.hstack([num_train_p, cat_train_p])
+    X_test  = np.hstack([num_test_p,  cat_test_p])
+    train_ds = TabularDataset(num_train_p, cat_train_p, y_train)
+    test_ds  = TabularDataset(num_test_p,  cat_test_p,  y_test)
+
+    return PreprocessedData(
+        X_train=X_train,
+        X_test=X_test,
+        y_train=y_train,
+        y_test=y_test,
+        scaler=scaler,
+        encoder=encoder,
+        mapping=mapping,
+        train_dataset=train_ds,
+        test_dataset=test_ds,
+    )
 
 
 def update_ema(target_params, source_params, rate=0.999):
@@ -71,234 +334,3 @@ def update_ema(target_params, source_params, rate=0.999):
     """
     for target, source in zip(target_params, source_params):
         target.detach().mul_(rate).add_(source.detach(), alpha=1 - rate)
-
-
-
-def concat_y_to_X(X, y):
-    if X is None:
-        return y.reshape(-1, 1)
-    return np.concatenate([y.reshape(-1, 1), X], axis=1)
-
-
-# def make_dataset(data_path: str, T: tools.data.Transformations, task_type, change_val: bool, concat = True):
-
-#     # classification
-#     if task_type == 'binclass' or task_type == 'multiclass':
-#         X_cat = {} if os.path.exists(os.path.join(data_path, 'X_cat_train.npy')) else None
-#         X_num = {} if os.path.exists(os.path.join(data_path, 'X_num_train.npy')) else None
-#         y = {} if os.path.exists(os.path.join(data_path, 'y_train.npy')) else None
-
-#         for split in ['train', 'test']:
-#             X_num_t, X_cat_t, y_t = tools.data.read_pure_data(data_path, split)
-#             if X_num is not None:
-#                 X_num[split] = X_num_t
-#             if X_cat is not None:
-#                 if concat:
-#                     X_cat_t = concat_y_to_X(X_cat_t, y_t)
-#                 X_cat[split] = X_cat_t  
-#             if y is not None:
-#                 y[split] = y_t
-#     else:
-#         # regression
-#         X_cat = {} if os.path.exists(os.path.join(data_path, 'X_cat_train.npy')) else None
-#         X_num = {} if os.path.exists(os.path.join(data_path, 'X_num_train.npy')) else None
-#         y = {} if os.path.exists(os.path.join(data_path, 'y_train.npy')) else None
-
-#         for split in ['train', 'test']:
-#             X_num_t, X_cat_t, y_t = tools.data.read_pure_data(data_path, split)
-
-#             if X_num is not None:
-#                 if concat:
-#                     X_num_t = concat_y_to_X(X_num_t, y_t)
-#                 X_num[split] = X_num_t
-#             if X_cat is not None:
-#                 X_cat[split] = X_cat_t
-#             if y is not None:
-#                 y[split] = y_t
-
-#     info = tools.data.load_json(os.path.join(data_path, 'info.json'))
-
-#     D = tools.data.Dataset(
-#         X_num,
-#         X_cat,
-#         y,
-#         y_info={},
-#         task_type=tools.data.TaskType(info['task_type']),
-#         n_classes=info.get('n_classes')
-#     )
-
-#     if change_val:
-#         D = tools.data.change_val(D)
-
-#     # def categorical_to_idx(feature):
-#     #     unique_categories = np.unique(feature)
-#     #     idx_mapping = {category: index for index, category in enumerate(unique_categories)}
-#     #     idx_feature = np.array([idx_mapping[category] for category in feature])
-#     #     return idx_feature
-
-#     # for split in ['train', 'val', 'test']:
-#     # D.y[split] = categorical_to_idx(D.y[split].squeeze(1))
-
-#     return tools.data.transform_dataset(D, T, None)
-
-
-def preprocess_and_save(data_path: str, info: dict, name: str, train_ratio: float = 0.9, save_dir_base: str = 'data', synthetic_dir_base: str = 'synthetic'):
-    # 1. Load data
-    data_df = pd.read_csv(data_path, header=info.get('header', 'infer'))
-    num_data = data_df.shape[0]
-    column_names = info.get('column_names') or data_df.columns.tolist()
-    num_col_idx = info['num_col_idx']
-    cat_col_idx = info['cat_col_idx']
-    target_col_idx = info['target_col_idx']
-
-    # 2. Column mapping
-    def get_column_name_mapping(data_df: pd.DataFrame, num_col_idx: list, cat_col_idx: list, target_col_idx: list, column_names: list = None):
-        if not column_names:
-            column_names = np.array(data_df.columns.tolist())
-        idx_mapping = {}
-        curr_num_idx = 0
-        curr_cat_idx = len(num_col_idx)
-        curr_target_idx = curr_cat_idx + len(cat_col_idx)
-        for idx in range(len(column_names)):
-            if idx in num_col_idx:
-                idx_mapping[int(idx)] = curr_num_idx
-                curr_num_idx += 1
-            elif idx in cat_col_idx:
-                idx_mapping[int(idx)] = curr_cat_idx
-                curr_cat_idx += 1
-            else:
-                idx_mapping[int(idx)] = curr_target_idx
-                curr_target_idx += 1
-        inverse_idx_mapping = {v: k for k, v in idx_mapping.items()}
-        idx_name_mapping = {i: column_names[i] for i in range(len(column_names))}
-        return idx_mapping, inverse_idx_mapping, idx_name_mapping
-
-    idx_mapping, inverse_idx_mapping, idx_name_mapping = get_column_name_mapping(
-        data_df, num_col_idx, cat_col_idx, target_col_idx, column_names
-    )
-    num_columns = [column_names[i] for i in num_col_idx]
-    cat_columns = [column_names[i] for i in cat_col_idx]
-    target_columns = [column_names[i] for i in target_col_idx]
-
-    # 3. Train/test split
-    num_train = int(num_data * train_ratio)
-    num_test = num_data - num_train
-
-    def train_val_test_split(df : pd.DataFrame, cat_columns: list, num_train: int, num_test: int, random_state: int = 42):
-        df_shuffled = df.sample(frac=1, random_state=random_state).reset_index(drop=True)
-        train_df = df_shuffled.iloc[:num_train].copy()
-        test_df = df_shuffled.iloc[num_train:num_train + num_test].copy()
-        seed = random_state
-        return train_df, test_df, seed
-    
-
-    train_df, test_df, seed = train_val_test_split(data_df, cat_columns, num_train, num_test)
-    train_df.columns = range(len(train_df.columns))
-    test_df.columns = range(len(test_df.columns))
-
-    # 4. Build col_info
-    col_info = {}
-    for col_idx in num_col_idx:
-        col_info[col_idx] = {}
-        col_info[col_idx]['type'] = 'numerical'
-        col_info[col_idx]['max'] = float(train_df[col_idx].max())
-        col_info[col_idx]['min'] = float(train_df[col_idx].min())
-    for col_idx in cat_col_idx:
-        col_info[col_idx] = {}
-        col_info[col_idx]['type'] = 'categorical'
-        col_info[col_idx]['categorizes'] = list(set(train_df[col_idx]))
-    for col_idx in target_col_idx:
-        if info['task_type'] == 'regression':
-            col_info[col_idx] = {}
-            col_info[col_idx]['type'] = 'numerical'
-            col_info[col_idx]['max'] = float(train_df[col_idx].max())
-            col_info[col_idx]['min'] = float(train_df[col_idx].min())
-        else:
-            col_info[col_idx] = {}
-            col_info[col_idx]['type'] = 'categorical'
-            col_info[col_idx]['categorizes'] = list(set(train_df[col_idx]))
-    info['column_info'] = col_info
-
-    # 5. Rename columns to original names for saving
-    train_df.rename(columns=idx_name_mapping, inplace=True)
-    test_df.rename(columns=idx_name_mapping, inplace=True)
-
-    # 6. Replace '?' with nan for numerical, 'nan' for categorical
-    for col in num_columns:
-        train_df.loc[train_df[col] == '?', col] = np.nan
-        test_df.loc[test_df[col] == '?', col] = np.nan
-    for col in cat_columns:
-        train_df.loc[train_df[col] == '?', col] = 'nan'
-        test_df.loc[test_df[col] == '?', col] = 'nan'
-
-    # 7. Extract arrays
-    X_num_train = train_df[num_columns].to_numpy().astype(np.float32)
-    X_cat_train = train_df[cat_columns].to_numpy()
-    y_train = train_df[target_columns].to_numpy()
-    X_num_test = test_df[num_columns].to_numpy().astype(np.float32)
-    X_cat_test = test_df[cat_columns].to_numpy()
-    y_test = test_df[target_columns].to_numpy()
-
-    # 8. Save arrays and CSVs
-    save_dir = os.path.join(save_dir_base, name)
-    os.makedirs(save_dir, exist_ok=True)
-    np.save(f'{save_dir}/X_num_train.npy', X_num_train)
-    np.save(f'{save_dir}/X_cat_train.npy', X_cat_train)
-    np.save(f'{save_dir}/y_train.npy', y_train)
-    np.save(f'{save_dir}/X_num_test.npy', X_num_test)
-    np.save(f'{save_dir}/X_cat_test.npy', X_cat_test)
-    np.save(f'{save_dir}/y_test.npy', y_test)
-
-    train_df[num_columns] = train_df[num_columns].astype(np.float32)
-    test_df[num_columns] = test_df[num_columns].astype(np.float32)
-    train_df.to_csv(f'{save_dir}/train.csv', index=False)
-    test_df.to_csv(f'{save_dir}/test.csv', index=False)
-
-    synthetic_dir = os.path.join(synthetic_dir_base, name)
-    os.makedirs(synthetic_dir, exist_ok=True)
-    train_df.to_csv(f'{synthetic_dir}/real.csv', index=False)
-    test_df.to_csv(f'{synthetic_dir}/test.csv', index=False)
-
-    # 9. Update info
-    info['column_names'] = column_names
-    info['train_num'] = train_df.shape[0]
-    info['test_num'] = test_df.shape[0]
-    info['idx_mapping'] = idx_mapping
-    info['inverse_idx_mapping'] = inverse_idx_mapping
-    info['idx_name_mapping'] = idx_name_mapping
-
-    # 10. Metadata
-    metadata = {'columns': {}}
-    task_type = info['task_type']
-    for i in num_col_idx:
-        metadata['columns'][i] = {'sdtype': 'numerical', 'computer_representation': 'Float'}
-    for i in cat_col_idx:
-        metadata['columns'][i] = {'sdtype': 'categorical'}
-    if task_type == 'regression':
-        for i in target_col_idx:
-            metadata['columns'][i] = {'sdtype': 'numerical', 'computer_representation': 'Float'}
-    else:
-        for i in target_col_idx:
-            metadata['columns'][i] = {'sdtype': 'categorical'}
-    info['metadata'] = metadata
-
-    # 11. Save info
-    with open(f'{save_dir}/info.json', 'w') as file:
-        json.dump(info, file, indent=4)
-
-    # 12. Print summary
-    print(f'Processing and Saving {name} Successfully!')
-    print(name)
-    print('Total', info['train_num'] + info['test_num'])
-    print('Train', info['train_num'])
-    print('Test', info['test_num'])
-    if info['task_type'] == 'regression':
-        num = len(info['num_col_idx'] + info['target_col_idx'])
-        cat = len(info['cat_col_idx'])
-    else:
-        cat = len(info['cat_col_idx'] + info['target_col_idx'])
-        num = len(info['num_col_idx'])
-    print('Num', num)
-    print('Cat', cat)
-    print('Numerical', X_num_train.shape)
-    print('Categorical', X_cat_train.shape)
