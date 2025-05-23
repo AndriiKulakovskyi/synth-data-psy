@@ -6,6 +6,13 @@ __pycache__/
 # C extensions
 *.so
 
+# Logs and outputs
+logs/
+runs/
+*.log
+*.log.*
+
+# Local development
 FACE
 
 # Distribution / packaging

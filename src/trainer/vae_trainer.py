@@ -5,9 +5,11 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import logging
 from typing import Tuple, Dict, Optional, List, Any
+from datetime import datetime
 
 from src.ldm.vae.model import Model_VAE, Encoder_model, Decoder_model
 from src.utils.config import Config
@@ -76,6 +78,16 @@ class VAETrainer:
         self.optimizer = None
         self.scheduler = None
         
+        # Initialize TensorBoard
+        log_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            'runs',
+            f'vae_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+        )
+        self.writer = SummaryWriter(log_dir=log_dir)
+        self.logger.info(f'TensorBoard logs will be saved to: {log_dir}')
+        self.global_step = 0
+        
     def setup_model(self, d_numerical: int, categories: List[int]) -> None:
         """
         Initialize the VAE model, optimizer and scheduler.
@@ -107,9 +119,18 @@ class VAETrainer:
             patience=self.config.training.scheduler_patience
         )
         
-        self.logger.info(
-            f"Model initialized with {sum(p.numel() for p in self.model.parameters() if p.requires_grad)} trainable parameters"
-        )
+        total_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        self.logger.info(f"Model initialized with {total_params} trainable parameters")
+        
+        # Log model architecture to TensorBoard
+        if hasattr(self, 'writer') and self.writer is not None:
+            # Create dummy input for graph visualization
+            dummy_num = torch.randn(1, d_numerical, device=self.device)
+            dummy_cat = torch.zeros(1, len(categories), dtype=torch.long, device=self.device)
+            try:
+                self.writer.add_graph(self.model, (dummy_num, dummy_cat))
+            except Exception as e:
+                self.logger.warning(f"Failed to add model graph to TensorBoard: {e}")
         
     def compute_loss(self, X_num: torch.Tensor, X_cat: torch.Tensor, 
                    Recon_X_num: torch.Tensor, Recon_X_cat: List[torch.Tensor], 
@@ -198,13 +219,33 @@ class VAETrainer:
             epoch_kl_loss += kl_loss.item() * batch_size
             epoch_acc += acc.item() * batch_size
             
+            # Log batch metrics to TensorBoard
+            if hasattr(self, 'writer') and self.writer is not None:
+                self.writer.add_scalar('train/batch/loss', loss.item(), self.global_step)
+                self.writer.add_scalar('train/batch/mse_loss', mse_loss.item(), self.global_step)
+                self.writer.add_scalar('train/batch/ce_loss', ce_loss.item(), self.global_step)
+                self.writer.add_scalar('train/batch/kl_loss', kl_loss.item(), self.global_step)
+                self.writer.add_scalar('train/batch/accuracy', acc.item(), self.global_step)
+                self.writer.add_scalar('train/batch/beta', self.beta, self.global_step)
+                self.writer.add_scalar('train/batch/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
+                
+                # Log histograms of parameters and gradients
+                if self.global_step % 100 == 0:  # Don't log too frequently to save space
+                    for name, param in self.model.named_parameters():
+                        if param.grad is not None:
+                            self.writer.add_histogram(f'params/{name}', param, self.global_step)
+                            self.writer.add_histogram(f'grads/{name}', param.grad, self.global_step)
+            
+            self.global_step += 1
+            
             # Update progress bar
             pbar.set_postfix({
                 'loss': loss.item(),
                 'mse': mse_loss.item(),
                 'ce': ce_loss.item(),
                 'kl': kl_loss.item(),
-                'acc': acc.item()
+                'acc': acc.item(),
+                'lr': self.optimizer.param_groups[0]['lr']
             })
             
         # Normalize metrics by dataset size
@@ -294,6 +335,20 @@ class VAETrainer:
         self.logger.info(f"Starting training for {self.config.training.num_epochs} epochs")
         start_time = time.time()
         
+        # Log hyperparameters to TensorBoard
+        if hasattr(self, 'writer') and self.writer is not None:
+            hparams = {
+                'learning_rate': self.config.training.learning_rate,
+                'weight_decay': self.config.training.weight_decay,
+                'batch_size': self.config.training.batch_size,
+                'num_epochs': self.config.training.num_epochs,
+                'beta_max': self.config.training.beta_max,
+                'd_token': self.config.model.d_token,
+                'n_head': self.config.model.n_head,
+                'num_layers': self.config.model.num_layers,
+            }
+            self.writer.add_hparams(hparams, {})
+        
         history = {
             'train_loss': [],
             'train_mse_loss': [],
@@ -332,7 +387,7 @@ class VAETrainer:
             
             history['beta'].append(self.beta)
             
-            # Log metrics
+            # Log metrics to console
             self.logger.info(
                 f"Epoch {epoch+1}/{self.config.training.num_epochs} - "
                 f"beta={self.beta:.6f} - "
@@ -348,6 +403,33 @@ class VAETrainer:
                 f"val_acc={val_metrics['accuracy']:.6f}"
             )
             
+            # Log metrics to TensorBoard
+            if hasattr(self, 'writer') and self.writer is not None:
+                # Log training metrics
+                self.writer.add_scalar('epoch/train/loss', train_metrics['loss'], epoch)
+                self.writer.add_scalar('epoch/train/mse_loss', train_metrics['mse_loss'], epoch)
+                self.writer.add_scalar('epoch/train/ce_loss', train_metrics['ce_loss'], epoch)
+                self.writer.add_scalar('epoch/train/kl_loss', train_metrics['kl_loss'], epoch)
+                self.writer.add_scalar('epoch/train/accuracy', train_metrics['accuracy'], epoch)
+                
+                # Log validation metrics
+                self.writer.add_scalar('epoch/val/loss', val_metrics['loss'], epoch)
+                self.writer.add_scalar('epoch/val/mse_loss', val_metrics['mse_loss'], epoch)
+                self.writer.add_scalar('epoch/val/ce_loss', val_metrics['ce_loss'], epoch)
+                self.writer.add_scalar('epoch/val/kl_loss', val_metrics['kl_loss'], epoch)
+                self.writer.add_scalar('epoch/val/accuracy', val_metrics['accuracy'], epoch)
+                
+                # Log learning rate and beta
+                self.writer.add_scalar('hyperparams/lr', self.optimizer.param_groups[0]['lr'], epoch)
+                self.writer.add_scalar('hyperparams/beta', self.beta, epoch)
+                
+                # Log histograms of model parameters
+                if epoch % 5 == 0:  # Don't log too frequently to save space
+                    for name, param in self.model.named_parameters():
+                        if param.grad is not None:
+                            self.writer.add_histogram(f'params/{name}', param, epoch)
+                            self.writer.add_histogram(f'grads/{name}', param.grad, epoch)
+            
             # Update learning rate based on validation loss
             self.scheduler.step(val_metrics['loss'])
             
@@ -357,6 +439,10 @@ class VAETrainer:
                 self.patience_counter = 0
                 self.save_model()
                 self.logger.info(f"Model improved, saved checkpoint at epoch {epoch+1}")
+                
+                # Log best model metrics to TensorBoard
+                if hasattr(self, 'writer') and self.writer is not None:
+                    self.writer.add_scalar('best/val_loss', self.best_val_loss, epoch)
             else:
                 self.patience_counter += 1
                 if self.patience_counter >= self.config.training.early_stopping_patience:
@@ -371,6 +457,28 @@ class VAETrainer:
         
         # Save embeddings after training
         self.save_embeddings(train_loader)
+        
+        # Close TensorBoard writer
+        if hasattr(self, 'writer') and self.writer is not None:
+            # Log final metrics
+            self.writer.add_hparams(
+                {
+                    'learning_rate': self.config.training.learning_rate,
+                    'weight_decay': self.config.training.weight_decay,
+                    'batch_size': self.config.training.batch_size,
+                    'num_epochs': self.config.training.num_epochs,
+                    'beta_max': self.config.training.beta_max,
+                },
+                {
+                    'hparam/best_val_loss': self.best_val_loss,
+                    'hparam/final_train_loss': history['train_loss'][-1],
+                    'hparam/final_val_loss': history['val_loss'][-1],
+                    'hparam/training_time': training_time * 60,  # Convert to seconds
+                },
+                run_name='.'  # This ensures the hparams are logged to the current run
+            )
+            self.writer.flush()
+            self.writer.close()
         
         return history
     
