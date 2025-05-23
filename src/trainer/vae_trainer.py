@@ -483,8 +483,34 @@ class VAETrainer:
         return history
     
     def save_model(self) -> None:
-        """Save the current model, encoder and decoder"""
-        torch.save(self.model.state_dict(), self.model_path)
+        """Save the current model, encoder, decoder, and model configuration"""
+        # Save model configuration
+        model_config = {
+            'model_params': {
+                'num_layers': self.config.model.num_layers,
+                'd_numerical': self.model.VAE.d_numerical,
+                'categories': self.model.VAE.categories,
+                'd_token': self.config.model.d_token,
+                'n_head': self.config.model.n_head,
+                'factor': self.config.model.factor,
+                'token_bias': self.config.model.token_bias
+            },
+            'training_params': {
+                'beta_max': self.config.training.beta_max,
+                'beta_min': self.config.training.beta_min,
+                'beta_decay_factor': self.config.training.beta_decay_factor
+            }
+        }
+        
+        # Save full model state dict with config and training state
+        torch.save({
+            'model_state_dict': self.model.state_dict(),
+            'model_config': model_config,
+            'epoch': self.current_epoch,
+            'best_val_loss': self.best_val_loss,
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None
+        }, self.model_path)
         
         # Create and save encoder and decoder models
         pre_encoder = Encoder_model(
@@ -508,12 +534,59 @@ class VAETrainer:
         pre_encoder.load_weights(self.model)
         pre_decoder.load_weights(self.model)
         
-        torch.save(pre_encoder.state_dict(), self.encoder_path)
-        torch.save(pre_decoder.state_dict(), self.decoder_path)
+        # Save encoder and decoder with config
+        torch.save({
+            'model_state_dict': pre_encoder.state_dict(),
+            'model_config': model_config
+        }, self.encoder_path)
+        
+        torch.save({
+            'model_state_dict': pre_decoder.state_dict(),
+            'model_config': model_config
+        }, self.decoder_path)
         
         self.logger.info(f"Saved model to {self.model_path}")
         self.logger.info(f"Saved encoder to {self.encoder_path}")
         self.logger.info(f"Saved decoder to {self.decoder_path}")
+    
+    @classmethod
+    def load_model(cls, checkpoint_path: str, device: str = None) -> Tuple[torch.nn.Module, dict]:
+        """
+        Load a saved model for inference.
+        
+        Args:
+            checkpoint_path: Path to the saved model checkpoint
+            device: Device to load the model on ('cuda' or 'cpu')
+            
+        Returns:
+            Tuple of (model, model_config)
+        """
+        if device is None:
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        
+        # Load checkpoint
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        model_config = checkpoint['model_config']
+        
+        # Import here to avoid circular imports
+        from src.ldm.vae.model import Model_VAE
+        
+        # Initialize model
+        model = Model_VAE(
+            num_layers=model_config['model_params']['num_layers'],
+            d_numerical=model_config['model_params']['d_numerical'],
+            categories=model_config['model_params']['categories'],
+            d_token=model_config['model_params']['d_token'],
+            n_head=model_config['model_params']['n_head'],
+            factor=model_config['model_params']['factor'],
+            bias=model_config['model_params']['token_bias']
+        ).to(device)
+        
+        # Load state dict
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.eval()
+        
+        return model, model_config
     
     def save_embeddings(self, data_loader: DataLoader) -> None:
         """
