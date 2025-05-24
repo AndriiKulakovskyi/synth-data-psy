@@ -35,5 +35,5 @@ paths:
   decoder_filename: decoder.pt
   embeddings_filename: train_z.npy
 
-device: auto  # 'auto', 'cpu', or 'cuda:N'
+device: auto  # 'auto', 'cpu', 'cuda:N' or 'mps'
 seed: 42 
