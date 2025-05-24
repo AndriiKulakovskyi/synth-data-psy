@@ -174,7 +174,6 @@ def main(args):
         num_loss = curr_loss_gauss / curr_count
         cat_loss = curr_loss_multi / curr_count
         kl_loss = curr_loss_kl / curr_count
-        
 
         '''
             Evaluation

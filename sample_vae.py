@@ -92,19 +92,7 @@ def save_samples(
     
     print(f"\nAll generated samples saved to {os.path.abspath(output_dir)}")
 
-def main():
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Generate samples from a trained VAE model')
-    parser.add_argument('--checkpoint', type=str, default='ckpt/model.pt',
-                       help='Path to the trained model checkpoint')
-    parser.add_argument('--num-samples', type=int, default=128,
-                       help='Number of samples to generate')
-    parser.add_argument('--output-dir', type=str, default='generated_samples',
-                       help='Directory to save generated samples')
-    parser.add_argument('--device', type=str, default=None,
-                       help='Device to use for generation (cuda/cpu)')
-    args = parser.parse_args()
-    
+def main(args):
     # Set device
     device = args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -131,4 +119,15 @@ def main():
     save_samples(x_num, x_cat, args.output_dir, model_config)
 
 if __name__ == "__main__":
-    main()
+
+    parser = argparse.ArgumentParser(description='Generate samples from a trained VAE model')
+    parser.add_argument('--checkpoint', type=str, default='ckpt/model.pt',
+                       help='Path to the trained model checkpoint')
+    parser.add_argument('--num-samples', type=int, default=128,
+                       help='Number of samples to generate')
+    parser.add_argument('--output-dir', type=str, default='generated_samples',
+                       help='Directory to save generated samples')
+    parser.add_argument('--device', type=str, default=None,
+                       help='Device to use for generation (cuda/cpu)')
+    args = parser.parse_args()
+    main(args)

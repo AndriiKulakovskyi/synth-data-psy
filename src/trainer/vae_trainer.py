@@ -11,7 +11,7 @@ import logging
 from typing import Tuple, Dict, Optional, List, Any
 from datetime import datetime
 
-from src.ldm.vae.model import Model_VAE, Encoder_model, Decoder_model
+from src.ldm.vae.model import VAE
 from src.utils.config import Config
 
 
@@ -96,7 +96,7 @@ class VAETrainer:
             d_numerical: Number of numerical features
             categories: List of category cardinalities for categorical features
         """
-        self.model = Model_VAE(
+        self.model = VAE(
             num_layers=self.config.model.num_layers,
             d_numerical=d_numerical,
             categories=categories,
@@ -198,12 +198,11 @@ class VAETrainer:
             
             # Forward pass
             Recon_X_num, Recon_X_cat, mu_z, logvar_z = self.model(batch_num, batch_cat)
-            
+
             # Compute loss
-            mse_loss, ce_loss, kl_loss, acc = self.compute_loss(
-                batch_num, batch_cat, Recon_X_num, Recon_X_cat, mu_z, logvar_z
-            )
-            
+            mse_loss, ce_loss, kl_loss, acc = self.compute_loss(batch_num, batch_cat,
+                                                                Recon_X_num, Recon_X_cat, mu_z, logvar_z)
+
             # Total loss
             loss = mse_loss + ce_loss + self.beta * kl_loss
             
@@ -487,13 +486,13 @@ class VAETrainer:
         # Save model configuration
         model_config = {
             'model_params': {
-                'num_layers': self.config.model.num_layers,
-                'd_numerical': self.model.VAE.d_numerical,
-                'categories': self.model.VAE.categories,
-                'd_token': self.config.model.d_token,
-                'n_head': self.config.model.n_head,
-                'factor': self.config.model.factor,
-                'token_bias': self.config.model.token_bias
+                'num_layers': self.model.num_layers,
+                'd_numerical': self.model.d_numerical,
+                'categories': self.model.categories,
+                'd_token': self.model.d_token,
+                'n_head': self.model.n_head,
+                'factor': self.model.factor,
+                'bias': self.model.bias
             },
             'training_params': {
                 'beta_max': self.config.training.beta_max,
@@ -512,42 +511,42 @@ class VAETrainer:
             'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None
         }, self.model_path)
         
-        # Create and save encoder and decoder models
-        pre_encoder = Encoder_model(
-            num_layers=self.config.model.num_layers,
-            d_numerical=self.model.VAE.d_numerical,
-            categories=self.model.VAE.categories,
-            d_token=self.config.model.d_token,
-            n_head=self.config.model.n_head,
-            factor=self.config.model.factor
-        ).to(self.device)
+        # # Create and save encoder and decoder models
+        # pre_encoder = Encoder_model(
+        #     num_layers=self.config.model.num_layers,
+        #     d_numerical=self.model.VAE.d_numerical,
+        #     categories=self.model.VAE.categories,
+        #     d_token=self.config.model.d_token,
+        #     n_head=self.config.model.n_head,
+        #     factor=self.config.model.factor
+        # ).to(self.device)
         
-        pre_decoder = Decoder_model(
-            num_layers=self.config.model.num_layers,
-            d_numerical=self.model.VAE.d_numerical,
-            categories=self.model.VAE.categories,
-            d_token=self.config.model.d_token,
-            n_head=self.config.model.n_head,
-            factor=self.config.model.factor
-        ).to(self.device)
+        # pre_decoder = Decoder_model(
+        #     num_layers=self.config.model.num_layers,
+        #     d_numerical=self.model.VAE.d_numerical,
+        #     categories=self.model.VAE.categories,
+        #     d_token=self.config.model.d_token,
+        #     n_head=self.config.model.n_head,
+        #     factor=self.config.model.factor
+        # ).to(self.device)
         
-        pre_encoder.load_weights(self.model)
-        pre_decoder.load_weights(self.model)
+        # pre_encoder.load_weights(self.model)
+        # pre_decoder.load_weights(self.model)
         
-        # Save encoder and decoder with config
-        torch.save({
-            'model_state_dict': pre_encoder.state_dict(),
-            'model_config': model_config
-        }, self.encoder_path)
+        # # Save encoder and decoder with config
+        # torch.save({
+        #     'model_state_dict': pre_encoder.state_dict(),
+        #     'model_config': model_config
+        # }, self.encoder_path)
         
-        torch.save({
-            'model_state_dict': pre_decoder.state_dict(),
-            'model_config': model_config
-        }, self.decoder_path)
+        # torch.save({
+        #     'model_state_dict': pre_decoder.state_dict(),
+        #     'model_config': model_config
+        # }, self.decoder_path)
         
         self.logger.info(f"Saved model to {self.model_path}")
-        self.logger.info(f"Saved encoder to {self.encoder_path}")
-        self.logger.info(f"Saved decoder to {self.decoder_path}")
+        # self.logger.info(f"Saved encoder to {self.encoder_path}")
+        # self.logger.info(f"Saved decoder to {self.decoder_path}")
     
     @classmethod
     def load_model(cls, checkpoint_path: str, device: str = None) -> Tuple[torch.nn.Module, dict]:
@@ -568,18 +567,15 @@ class VAETrainer:
         checkpoint = torch.load(checkpoint_path, map_location=device)
         model_config = checkpoint['model_config']
         
-        # Import here to avoid circular imports
-        from src.ldm.vae.model import Model_VAE
-        
         # Initialize model
-        model = Model_VAE(
+        model = VAE(
             num_layers=model_config['model_params']['num_layers'],
             d_numerical=model_config['model_params']['d_numerical'],
             categories=model_config['model_params']['categories'],
             d_token=model_config['model_params']['d_token'],
             n_head=model_config['model_params']['n_head'],
             factor=model_config['model_params']['factor'],
-            bias=model_config['model_params']['token_bias']
+            bias=model_config['model_params']['bias']
         ).to(device)
         
         # Load state dict
@@ -597,32 +593,20 @@ class VAETrainer:
         """
         self.logger.info("Generating and saving latent embeddings")
         
-        # Create encoder model
-        pre_encoder = Encoder_model(
-            num_layers=self.config.model.num_layers,
-            d_numerical=self.model.VAE.d_numerical,
-            categories=self.model.VAE.categories,
-            d_token=self.config.model.d_token,
-            n_head=self.config.model.n_head,
-            factor=self.config.model.factor
-        ).to(self.device)
-        
-        pre_encoder.load_weights(self.model)
-        
         # Generate embeddings
         all_embeddings = []
-        pre_encoder.eval()
+        self.model.eval()
         
         with torch.no_grad():
             for batch_num, batch_cat in data_loader:
                 batch_num = batch_num.to(self.device)
                 batch_cat = batch_cat.to(self.device)
                 
-                embeddings = pre_encoder(batch_num, batch_cat).cpu().numpy()
-                all_embeddings.append(embeddings)
+                embeddings = self.model.get_embedding(batch_num, batch_cat)
+                all_embeddings.append(embeddings.cpu().numpy())
         
         # Concatenate and save embeddings
         all_embeddings = np.vstack(all_embeddings)
         np.save(self.embeddings_path, all_embeddings)
         
-        self.logger.info(f"Saved embeddings with shape {all_embeddings.shape} to {self.embeddings_path}") 
+        self.logger.info(f"Saved embeddings with shape {all_embeddings.shape} to {self.embeddings_path}")
