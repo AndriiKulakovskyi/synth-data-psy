@@ -15,6 +15,7 @@ from sklearn.preprocessing import (
 )
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
+from src.data.wrangle import DataWrangler
 
 
 ScalerStrategy = Literal["standard", "minmax", "quantile", None]
@@ -334,3 +335,70 @@ def update_ema(target_params, source_params, rate=0.999):
     """
     for target, source in zip(target_params, source_params):
         target.detach().mul_(rate).add_(source.detach(), alpha=1 - rate)
+
+
+def reconstruct_decoded_dataframe(
+    numerical_matrix: Union[np.ndarray, torch.Tensor],
+    categorical_matrix: Union[np.ndarray, torch.Tensor, List[np.ndarray], List[torch.Tensor]],
+    mapping: Dict[str, Any],
+    wrangler: "DataWrangler",
+    *,
+    drop_scaled: bool = True,
+) -> pd.DataFrame:
+    """Rebuild and decode a DataFrame from generated VAE outputs.
+
+    Parameters
+    ----------
+    numerical_matrix:
+        Generated numerical values (``n_samples``\ x ``n_num_features``).
+    categorical_matrix:
+        Generated categorical data either as one NumPy array of class indices
+        or a list/array of class probability tensors.
+    mapping:
+        Mapping dictionary returned by :func:`split_numerical_categorical` from
+        the original training data.
+    wrangler:
+        Fitted :class:`~src.data.wrangle.DataWrangler` used during preprocessing
+        (provides inverse transformations).
+    drop_scaled:
+        Passed to :meth:`DataWrangler.inverse_transform` indicating whether
+        numeric features should be restored to their original scale.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with original column order and decoded values.
+    """
+
+    # ─── convert tensors and probabilities to integer matrices ──────────────
+    if isinstance(numerical_matrix, torch.Tensor):
+        numerical_matrix = numerical_matrix.cpu().numpy()
+
+    if isinstance(categorical_matrix, list):
+        cat_arrs = []
+        for cat in categorical_matrix:
+            if isinstance(cat, torch.Tensor):
+                cat = cat.cpu().numpy()
+            if cat.ndim > 1:
+                cat = cat.argmax(axis=1)
+            cat_arrs.append(cat)
+        categorical_matrix = np.column_stack(cat_arrs) if cat_arrs else np.empty((len(numerical_matrix), 0))
+    else:
+        if isinstance(categorical_matrix, torch.Tensor):
+            categorical_matrix = categorical_matrix.cpu().numpy()
+        if categorical_matrix.ndim > 1 and categorical_matrix.shape[-1] > 1:
+            categorical_matrix = categorical_matrix.argmax(axis=-1)
+
+    # ─── adjust mapping index for new rows ───────────────────────────────────
+    mapping = mapping.copy()
+    mapping["index"] = pd.RangeIndex(start=0, stop=numerical_matrix.shape[0])
+
+    df_encoded = reconstruct_dataframe(
+        numerical_matrix=numerical_matrix,
+        categorical_matrix=categorical_matrix,
+        mapping=mapping,
+    )
+
+    # Use wrangler to decode categorical values and undo scaling
+    decoded_df = wrangler.inverse_transform(df_encoded, drop_scaled=drop_scaled)
+    return decoded_df
