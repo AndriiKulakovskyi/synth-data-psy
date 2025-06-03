@@ -17,7 +17,7 @@ def parse_args():
                         help='Path to configuration file')
     parser.add_argument('--data_path', type=str, 
                         help='Override data path from config')
-    parser.add_argument('--device', type=str, 
+    parser.add_argument('--device', type=str, default='mps',
                         help='Override device from config (cpu, cuda:0, mps, etc.)')
     parser.add_argument('--checkpoint_dir', type=str, 
                         help='Override checkpoint directory from config')

@@ -38,7 +38,6 @@ def main() -> None:
         'usubjid_neuropsychologie',
         'visitnum_neuropsychologie',
         'visit_neuropsychologie',
-        'visit_neuropsychologie',  # kept as in original script
     ]
     df_raw = df_raw.drop(columns=[c for c in cols_to_drop if c in df_raw.columns], errors='ignore')
 

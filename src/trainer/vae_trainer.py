@@ -10,6 +10,11 @@ from tqdm import tqdm
 import logging
 from typing import Tuple, Dict, Optional, List, Any
 from datetime import datetime
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import io
+from PIL import Image
 
 from src.ldm.vae.model import VAE
 from src.utils.config import Config
@@ -263,12 +268,173 @@ class VAETrainer:
             'accuracy': epoch_acc
         }
         
-    def val_step(self, val_loader: DataLoader) -> Dict[str, float]:
+    def _compute_and_log_correlations(self, original_num: torch.Tensor, original_cat: torch.Tensor,
+                                    recon_num: torch.Tensor, recon_cat: List[torch.Tensor], 
+                                    epoch: int) -> None:
+        """
+        Compute correlation matrices and log them to TensorBoard.
+        
+        Args:
+            original_num: Original numerical features
+            original_cat: Original categorical features  
+            recon_num: Reconstructed numerical features
+            recon_cat: Reconstructed categorical features (list of tensors)
+            epoch: Current epoch number
+        """
+        try:
+            # Convert tensors to numpy arrays
+            original_num_np = original_num.detach().cpu().numpy()
+            recon_num_np = recon_num.detach().cpu().numpy()
+            original_cat_np = original_cat.detach().cpu().numpy()
+            
+            # Convert reconstructed categorical to predictions
+            recon_cat_np = []
+            for cat_tensor in recon_cat:
+                if cat_tensor is not None:
+                    pred_cat = torch.argmax(cat_tensor, dim=-1).detach().cpu().numpy()
+                    recon_cat_np.append(pred_cat)
+                else:
+                    recon_cat_np.append(None)
+            
+            # Create dataframes
+            num_features = original_num_np.shape[1] if original_num_np.shape[1] > 0 else 0
+            cat_features = len([x for x in recon_cat_np if x is not None])
+            
+            # Combine numerical and categorical features for original data
+            original_data = []
+            feature_names = []
+            
+            # Add numerical features
+            if num_features > 0:
+                for i in range(num_features):
+                    original_data.append(original_num_np[:, i])
+                    feature_names.append(f'num_{i}')
+            
+            # Add categorical features
+            for i, cat_data in enumerate(recon_cat_np):
+                if cat_data is not None:
+                    original_data.append(original_cat_np[:, i])
+                    feature_names.append(f'cat_{i}')
+            
+            # Create reconstructed data
+            recon_data = []
+            
+            # Add numerical features
+            if num_features > 0:
+                for i in range(num_features):
+                    recon_data.append(recon_num_np[:, i])
+            
+            # Add categorical features
+            for cat_data in recon_cat_np:
+                if cat_data is not None:
+                    recon_data.append(cat_data)
+            
+            if len(original_data) > 1 and len(recon_data) > 1:
+                # Create dataframes
+                original_df = pd.DataFrame(np.column_stack(original_data), columns=feature_names)
+                recon_df = pd.DataFrame(np.column_stack(recon_data), columns=feature_names)
+                
+                # Compute correlation matrices
+                original_corr = original_df.corr(method='pearson')
+                recon_corr = recon_df.corr(method='pearson')
+                
+                # Create correlation plots
+                fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+                plt.style.use('default')  # Ensure clean default style
+                
+                # Determine annotation strategy based on matrix size
+                matrix_size = len(original_corr)
+                show_annotations = matrix_size <= 10  # Only show values for small matrices
+                fmt = '.2f' if show_annotations else ''
+                
+                # Original correlation matrix
+                sns.heatmap(original_corr, 
+                           annot=show_annotations, 
+                           fmt=fmt,
+                           cmap='coolwarm', 
+                           center=0, 
+                           square=True, 
+                           ax=axes[0], 
+                           cbar_kws={'shrink': 0.7},
+                           xticklabels=False,
+                           yticklabels=False)
+                axes[0].set_title('Original', fontsize=10, pad=10)
+                
+                # Reconstructed correlation matrix
+                sns.heatmap(recon_corr, 
+                           annot=show_annotations, 
+                           fmt=fmt,
+                           cmap='coolwarm', 
+                           center=0,
+                           square=True, 
+                           ax=axes[1], 
+                           cbar_kws={'shrink': 0.7},
+                           xticklabels=False,
+                           yticklabels=False)
+                axes[1].set_title('Reconstructed', fontsize=10, pad=10)
+                
+                # Difference in correlations
+                corr_diff = recon_corr - original_corr
+                sns.heatmap(corr_diff, 
+                           annot=show_annotations, 
+                           fmt=fmt,
+                           cmap='RdBu_r', 
+                           center=0,
+                           square=True, 
+                           ax=axes[2], 
+                           cbar_kws={'shrink': 0.7},
+                           xticklabels=False,
+                           yticklabels=False)
+                axes[2].set_title('Difference', fontsize=10, pad=10)
+                
+                # Remove extra spacing and make layout tight
+                plt.tight_layout(pad=1.0, w_pad=1.0)
+                
+                # Convert plot to image and log to TensorBoard
+                if hasattr(self, 'writer') and self.writer is not None:
+                    # Save plot to buffer with high quality
+                    buf = io.BytesIO()
+                    plt.savefig(buf, 
+                               format='png', 
+                               dpi=100, 
+                               bbox_inches='tight',
+                               facecolor='white',
+                               edgecolor='none',
+                               pad_inches=0.1)
+                    buf.seek(0)
+                    
+                    # Convert to PIL Image and then to tensor
+                    image = Image.open(buf)
+                    image_tensor = torch.tensor(np.array(image)).permute(2, 0, 1)
+                    
+                    # Log to TensorBoard
+                    self.writer.add_image('correlations/comparison', image_tensor, epoch)
+                    
+                    # Log correlation statistics
+                    original_corr_mean = np.abs(original_corr.values[np.triu_indices_from(original_corr.values, k=1)]).mean()
+                    recon_corr_mean = np.abs(recon_corr.values[np.triu_indices_from(recon_corr.values, k=1)]).mean()
+                    corr_diff_mean = np.abs(corr_diff.values[np.triu_indices_from(corr_diff.values, k=1)]).mean()
+                    
+                    self.writer.add_scalar('correlations/original_mean_abs_corr', original_corr_mean, epoch)
+                    self.writer.add_scalar('correlations/recon_mean_abs_corr', recon_corr_mean, epoch)
+                    self.writer.add_scalar('correlations/mean_abs_diff', corr_diff_mean, epoch)
+                    
+                    buf.close()
+                
+                plt.close()
+                
+                self.logger.info(f"Correlation analysis logged for epoch {epoch}")
+                
+        except Exception as e:
+            self.logger.warning(f"Failed to compute correlations at epoch {epoch}: {e}")
+        
+    def val_step(self, val_loader: DataLoader, epoch: int = 0) -> Dict[str, float]:
         """
         Execute one validation epoch.
         
         Args:
             val_loader: DataLoader for validation data
+            epoch: Current epoch number for correlation tracking
             
         Returns:
             Dictionary of validation metrics
@@ -280,6 +446,13 @@ class VAETrainer:
         epoch_kl_loss = 0.0
         epoch_acc = 0.0
         
+        # Collect data for correlation analysis every 20 epochs
+        collect_correlations = (epoch + 1) % 20 == 0
+        all_original_num = []
+        all_original_cat = []
+        all_recon_num = []
+        all_recon_cat = []
+        
         with torch.no_grad():
             for batch_num, batch_cat in val_loader:
                 batch_num = batch_num.to(self.device)
@@ -287,6 +460,20 @@ class VAETrainer:
                 
                 # Forward pass
                 Recon_X_num, Recon_X_cat, mu_z, logvar_z = self.model(batch_num, batch_cat)
+                
+                # Collect data for correlation analysis
+                if collect_correlations:
+                    all_original_num.append(batch_num.cpu())
+                    all_original_cat.append(batch_cat.cpu())
+                    all_recon_num.append(Recon_X_num.cpu())
+                    # Store categorical reconstructions
+                    batch_recon_cat = []
+                    for cat_tensor in Recon_X_cat:
+                        if cat_tensor is not None:
+                            batch_recon_cat.append(cat_tensor.cpu())
+                        else:
+                            batch_recon_cat.append(None)
+                    all_recon_cat.append(batch_recon_cat)
                 
                 # Compute loss
                 mse_loss, ce_loss, kl_loss, acc = self.compute_loss(
@@ -303,6 +490,41 @@ class VAETrainer:
                 epoch_ce_loss += ce_loss.item() * batch_size
                 epoch_kl_loss += kl_loss.item() * batch_size
                 epoch_acc += acc.item() * batch_size
+        
+        # Compute correlations every 20 epochs
+        if collect_correlations and len(all_original_num) > 0:
+            try:
+                # Concatenate all batches
+                concatenated_original_num = torch.cat(all_original_num, dim=0)
+                concatenated_original_cat = torch.cat(all_original_cat, dim=0)
+                concatenated_recon_num = torch.cat(all_recon_num, dim=0)
+                
+                # Handle categorical reconstructions
+                num_cat_features = len(all_recon_cat[0]) if len(all_recon_cat) > 0 else 0
+                concatenated_recon_cat = []
+                
+                for cat_idx in range(num_cat_features):
+                    cat_tensors = []
+                    for batch_cats in all_recon_cat:
+                        if batch_cats[cat_idx] is not None:
+                            cat_tensors.append(batch_cats[cat_idx])
+                    
+                    if cat_tensors:
+                        concatenated_recon_cat.append(torch.cat(cat_tensors, dim=0))
+                    else:
+                        concatenated_recon_cat.append(None)
+                
+                # Compute and log correlations
+                self._compute_and_log_correlations(
+                    concatenated_original_num, 
+                    concatenated_original_cat,
+                    concatenated_recon_num, 
+                    concatenated_recon_cat, 
+                    epoch
+                )
+                
+            except Exception as e:
+                self.logger.warning(f"Failed to process correlation data at epoch {epoch}: {e}")
                 
         # Normalize metrics by dataset size
         num_samples = len(val_loader.dataset)
@@ -369,7 +591,7 @@ class VAETrainer:
             train_metrics = self.train_step(train_loader)
             
             # Validation step
-            val_metrics = self.val_step(val_loader)
+            val_metrics = self.val_step(val_loader, epoch)
             
             # Update history
             history['train_loss'].append(train_metrics['loss'])
