@@ -350,7 +350,7 @@ def reconstruct_decoded_dataframe(
     Parameters
     ----------
     numerical_matrix:
-        Generated numerical values (``n_samples``\ x ``n_num_features``).
+        Generated numerical values (``n_samples`` x ``n_num_features``).
     categorical_matrix:
         Generated categorical data either as one NumPy array of class indices
         or a list/array of class probability tensors.
@@ -399,6 +399,19 @@ def reconstruct_decoded_dataframe(
         mapping=mapping,
     )
 
-    # Use wrangler to decode categorical values and undo scaling
-    decoded_df = wrangler.inverse_transform(df_encoded, drop_scaled=drop_scaled)
+    # Create a filtered wrangler that only has encoders/scalers for columns in df_encoded
+    filtered_wrangler = DataWrangler(
+        conversion_threshold=wrangler.conversion_threshold,
+        cardinality_threshold=wrangler.cardinality_threshold,
+        scale_numeric=wrangler.scale_numeric,
+    )
+    
+    # Only copy encoders/scalers/medians for columns that exist in df_encoded
+    available_cols = set(df_encoded.columns)
+    filtered_wrangler.encoders = {k: v for k, v in wrangler.encoders.items() if k in available_cols}
+    filtered_wrangler.scalers = {k: v for k, v in wrangler.scalers.items() if k in available_cols}
+    filtered_wrangler.nan_medians = {k: v for k, v in wrangler.nan_medians.items() if k in available_cols}
+
+    # Use filtered wrangler to decode categorical values and undo scaling
+    decoded_df = filtered_wrangler.inverse_transform(df_encoded, drop_scaled=drop_scaled)
     return decoded_df
