@@ -1,7 +1,7 @@
 # VAE Training Configuration
 
 data:
-  train_data_path: FACE/neuropsy_bp_partial_n_cols_60.csv
+  train_data_path: FACE/neuropsy_v0_partial_n_cols_60.csv
   test_size: 0.25
   cardinality_threshold: 7
   transform: false

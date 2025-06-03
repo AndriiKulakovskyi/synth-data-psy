@@ -13,7 +13,7 @@ runs/
 *.log.*
 
 # Local development
-FACE
+#FACE
 
 # Distribution / packaging
 .Python

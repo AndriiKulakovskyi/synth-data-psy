@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from dataclasses import dataclass
 from torch.utils.data import Dataset
-from typing import Dict, Any, Optional, Tuple, Literal
+from typing import Dict, Any, List, Optional, Tuple, Literal, Union
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import (
     StandardScaler,
