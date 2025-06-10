@@ -169,6 +169,41 @@ After training, you can generate synthetic samples using the trained model:
    num_samples, cat_samples = generate_samples(decoder, num_samples=10, latent_dim=config.model.d_token)
    ```
 
+### VAE Sanity Check
+
+After training your VAE model, you can perform a sanity check to analyze the learned latent space using the `vae_sanity.py` script:
+
+```bash
+python vae_sanity.py --checkpoint ckpt/model.pt --config config/vae_config.yaml
+```
+
+This script will:
+- Load your trained VAE model
+- Encode the entire training dataset
+- Plot the latent distribution (2D scatter plot, histograms, correlation matrix)
+- Print detailed statistics about the latent space
+
+**What to look for:**
+- **μ (mean) values** should be centered around 0
+- **σ² (variance) values** should be close to 1
+- The latent distribution should approximate a standard normal distribution
+- Low correlation between latent dimensions indicates good disentanglement
+
+**Common issues:**
+- If μ is far from 0: The model hasn't learned to use the prior well
+- If σ² << 1: The latent space is "collapsed" (posterior collapse)
+- If σ² >> 1: The latent space is "expanded" 
+- High correlation: Redundancy between latent dimensions
+
+**Options:**
+```bash
+python vae_sanity.py --help
+# --checkpoint: Path to model checkpoint (default: ckpt/model.pt)
+# --config: Path to config file (default: config/vae_config.yaml)  
+# --device: Device to use (default: auto)
+# --max_samples: Max samples to analyze for memory efficiency (default: 5000)
+```
+
 ## Output Files
 
 After training, the following files will be saved:

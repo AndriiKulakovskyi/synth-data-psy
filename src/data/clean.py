@@ -2,14 +2,14 @@ import numpy as np
 import pandas as pd
 
 
-def clean(df: pd.DataFrame, impute: bool = False) -> pd.DataFrame:
+def clean(df: pd.DataFrame, missing_threshold: float = 75, impute: bool = False) -> pd.DataFrame:
     # Calculate the percentage of missing values in each column
     missing_percentage = df.isnull().sum() / len(df) * 100
 
-    # Identify columns with more than 90% missing values
-    columns_to_drop = missing_percentage[missing_percentage > 90].index
+    # Identify columns with more than missing_threshold % missing values
+    columns_to_drop = missing_percentage[missing_percentage > missing_threshold].index
 
-    # Drop the columns with more than 90% missing values
+    # Drop the columns with more than missing_threshold % missing values
     df_cleaned = df.drop(columns=columns_to_drop, errors='ignore')
 
     if impute:

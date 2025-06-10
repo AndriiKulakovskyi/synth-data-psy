@@ -42,8 +42,16 @@ class VAE(nn.Module):
         return x_num_rec, x_cat_rec, mu_z, logvar_z
 
     def sample(self, num_samples, current_device):
-        # Generate noise with CLS token
-        z = torch.randn(num_samples, self.d_numerical + len(self.categories) + 1, self.d_token).to(current_device)
-        # Remove CLS token before decoding
-        return self.decoder(z[:, 1:])
+        # Sample from standard normal distribution in the latent space
+        # The latent space has dimensions: (batch_size, n_tokens, d_token)
+        # where n_tokens = d_numerical + len(categories) + 1 (for CLS token)
+        n_tokens = self.d_numerical + len(self.categories) + 1
+        
+        # Sample from standard normal distribution (matching the prior that KL loss encourages)
+        z = torch.randn(num_samples, n_tokens, self.d_token).to(current_device)
+        
+        # Remove CLS token before decoding (decoder expects inputs without CLS token)
+        z_without_cls = z[:, 1:]  # Remove the first token (CLS)
+        
+        return self.decoder(z_without_cls)
 

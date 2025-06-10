@@ -75,8 +75,14 @@ class VAETrainer:
         self.best_val_loss = float('inf')
         self.patience_counter = 0
         
-        # Beta for KL annealing
-        self.beta = config.training.beta_max
+        # Beta for KL annealing - create linear schedule
+        self.beta_schedule = np.linspace(
+            config.training.beta_min, 
+            config.training.beta_max, 
+            config.training.num_epochs
+        )
+        self.beta = self.beta_schedule[0]  # Start with the first value
+        self.logger.info(f"Beta annealing schedule: {config.training.beta_min:.6f} -> {config.training.beta_max:.6f} over {config.training.num_epochs} epochs")
         
         # Model, optimizer and scheduler will be initialized in setup_model method
         self.model = None
@@ -111,7 +117,7 @@ class VAETrainer:
             bias=self.config.model.token_bias
         ).to(self.device)
         
-        self.optimizer = torch.optim.Adam(
+        self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.config.training.learning_rate,
             weight_decay=self.config.training.weight_decay
@@ -175,6 +181,38 @@ class VAETrainer:
         
         return mse_loss, ce_loss, kl_loss, acc
         
+    def _safe_log_histogram(self, tag: str, tensor: torch.Tensor, step: int) -> None:
+        """
+        Safely log histogram to TensorBoard with error handling.
+        
+        Args:
+            tag: Tag for the histogram
+            tensor: Tensor to log
+            step: Global step or epoch number
+        """
+        try:
+            # Check if tensor is valid for histogram logging
+            if tensor is None or tensor.numel() == 0:
+                return
+            
+            # Check for invalid values (NaN, Inf)
+            if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+                self.logger.warning(f"Skipping histogram for {tag}: contains NaN or Inf values")
+                return
+            
+            # Check if tensor has variance (not all same values)
+            if tensor.numel() > 1:
+                tensor_std = torch.std(tensor)
+                if tensor_std == 0 or torch.isnan(tensor_std):
+                    self.logger.debug(f"Skipping histogram for {tag}: no variance in values")
+                    return
+            
+            # Log the histogram
+            self.writer.add_histogram(tag, tensor, step)
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to log histogram for {tag}: {e}")
+        
     def train_step(self, train_loader: DataLoader) -> Dict[str, float]:
         """
         Execute one training epoch.
@@ -237,8 +275,8 @@ class VAETrainer:
                 if self.global_step % 100 == 0:  # Don't log too frequently to save space
                     for name, param in self.model.named_parameters():
                         if param.grad is not None:
-                            self.writer.add_histogram(f'params/{name}', param, self.global_step)
-                            self.writer.add_histogram(f'grads/{name}', param.grad, self.global_step)
+                            self._safe_log_histogram(f'params/{name}', param, self.global_step)
+                            self._safe_log_histogram(f'grads/{name}', param.grad, self.global_step)
             
             self.global_step += 1
             
@@ -408,7 +446,7 @@ class VAETrainer:
                     image_tensor = torch.tensor(np.array(image)).permute(2, 0, 1)
                     
                     # Log to TensorBoard
-                    self.writer.add_image('correlations/comparison', image_tensor, epoch)
+                    self.writer.add_image('correlations/reconstruction_comparison', image_tensor, epoch)
                     
                     # Log correlation statistics
                     original_corr_mean = np.abs(original_corr.values[np.triu_indices_from(original_corr.values, k=1)]).mean()
@@ -417,16 +455,181 @@ class VAETrainer:
                     
                     self.writer.add_scalar('correlations/original_mean_abs_corr', original_corr_mean, epoch)
                     self.writer.add_scalar('correlations/recon_mean_abs_corr', recon_corr_mean, epoch)
-                    self.writer.add_scalar('correlations/mean_abs_diff', corr_diff_mean, epoch)
+                    self.writer.add_scalar('correlations/recon_mean_abs_diff', corr_diff_mean, epoch)
                     
                     buf.close()
                 
                 plt.close()
                 
-                self.logger.info(f"Correlation analysis logged for epoch {epoch}")
+                self.logger.info(f"Reconstruction correlation analysis logged for epoch {epoch}")
                 
         except Exception as e:
-            self.logger.warning(f"Failed to compute correlations at epoch {epoch}: {e}")
+            self.logger.warning(f"Failed to compute reconstruction correlations at epoch {epoch}: {e}")
+
+    def _generate_and_log_sample_correlations(self, original_num: torch.Tensor, original_cat: torch.Tensor,
+                                            epoch: int, num_samples: int = None) -> None:
+        """
+        Generate new data samples from latent space and compute correlation maps.
+        
+        Args:
+            original_num: Original numerical features for reference
+            original_cat: Original categorical features for reference
+            epoch: Current epoch number
+            num_samples: Number of samples to generate (defaults to original data size)
+        """
+        try:
+            if num_samples is None:
+                num_samples = original_num.shape[0]
+            
+            # Generate samples from latent space
+            with torch.no_grad():
+                generated_num, generated_cat = self.model.sample(num_samples, self.device)
+            
+            # Convert generated data to numpy
+            generated_num_np = generated_num.detach().cpu().numpy()
+            original_num_np = original_num.detach().cpu().numpy()
+            original_cat_np = original_cat.detach().cpu().numpy()
+            
+            # Convert generated categorical to predictions
+            generated_cat_np = []
+            for cat_tensor in generated_cat:
+                if cat_tensor is not None:
+                    pred_cat = torch.argmax(cat_tensor, dim=-1).detach().cpu().numpy()
+                    generated_cat_np.append(pred_cat)
+                else:
+                    generated_cat_np.append(None)
+            
+            # Create feature data
+            num_features = original_num_np.shape[1] if original_num_np.shape[1] > 0 else 0
+            cat_features = len([x for x in generated_cat_np if x is not None])
+            
+            # Combine numerical and categorical features for original data
+            original_data = []
+            feature_names = []
+            
+            # Add numerical features
+            if num_features > 0:
+                for i in range(num_features):
+                    original_data.append(original_num_np[:, i])
+                    feature_names.append(f'num_{i}')
+            
+            # Add categorical features
+            for i, cat_data in enumerate(generated_cat_np):
+                if cat_data is not None:
+                    original_data.append(original_cat_np[:, i])
+                    feature_names.append(f'cat_{i}')
+            
+            # Create generated data
+            generated_data = []
+            
+            # Add numerical features
+            if num_features > 0:
+                for i in range(num_features):
+                    generated_data.append(generated_num_np[:, i])
+            
+            # Add categorical features
+            for cat_data in generated_cat_np:
+                if cat_data is not None:
+                    generated_data.append(cat_data)
+            
+            if len(original_data) > 1 and len(generated_data) > 1:
+                # Create dataframes
+                original_df = pd.DataFrame(np.column_stack(original_data), columns=feature_names)
+                generated_df = pd.DataFrame(np.column_stack(generated_data), columns=feature_names)
+                
+                # Compute correlation matrices
+                original_corr = original_df.corr(method='pearson')
+                generated_corr = generated_df.corr(method='pearson')
+                
+                # Create correlation plots
+                fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+                plt.style.use('default')  # Ensure clean default style
+                
+                # Determine annotation strategy based on matrix size
+                matrix_size = len(original_corr)
+                show_annotations = matrix_size <= 10  # Only show values for small matrices
+                fmt = '.2f' if show_annotations else ''
+                
+                # Original correlation matrix
+                sns.heatmap(original_corr, 
+                           annot=show_annotations, 
+                           fmt=fmt,
+                           cmap='coolwarm', 
+                           center=0, 
+                           square=True, 
+                           ax=axes[0], 
+                           cbar_kws={'shrink': 0.7},
+                           xticklabels=False,
+                           yticklabels=False)
+                axes[0].set_title('Original', fontsize=10, pad=10)
+                
+                # Generated correlation matrix
+                sns.heatmap(generated_corr, 
+                           annot=show_annotations, 
+                           fmt=fmt,
+                           cmap='coolwarm', 
+                           center=0,
+                           square=True, 
+                           ax=axes[1], 
+                           cbar_kws={'shrink': 0.7},
+                           xticklabels=False,
+                           yticklabels=False)
+                axes[1].set_title('Generated', fontsize=10, pad=10)
+                
+                # Difference in correlations
+                corr_diff = generated_corr - original_corr
+                sns.heatmap(corr_diff, 
+                           annot=show_annotations, 
+                           fmt=fmt,
+                           cmap='RdBu_r', 
+                           center=0,
+                           square=True, 
+                           ax=axes[2], 
+                           cbar_kws={'shrink': 0.7},
+                           xticklabels=False,
+                           yticklabels=False)
+                axes[2].set_title('Difference', fontsize=10, pad=10)
+                
+                # Remove extra spacing and make layout tight
+                plt.tight_layout(pad=1.0, w_pad=1.0)
+                
+                # Convert plot to image and log to TensorBoard
+                if hasattr(self, 'writer') and self.writer is not None:
+                    # Save plot to buffer with high quality
+                    buf = io.BytesIO()
+                    plt.savefig(buf, 
+                               format='png', 
+                               dpi=100, 
+                               bbox_inches='tight',
+                               facecolor='white',
+                               edgecolor='none',
+                               pad_inches=0.1)
+                    buf.seek(0)
+                    
+                    # Convert to PIL Image and then to tensor
+                    image = Image.open(buf)
+                    image_tensor = torch.tensor(np.array(image)).permute(2, 0, 1)
+                    
+                    # Log to TensorBoard
+                    self.writer.add_image('correlations/generated_comparison', image_tensor, epoch)
+                    
+                    # Log correlation statistics
+                    original_corr_mean = np.abs(original_corr.values[np.triu_indices_from(original_corr.values, k=1)]).mean()
+                    generated_corr_mean = np.abs(generated_corr.values[np.triu_indices_from(generated_corr.values, k=1)]).mean()
+                    corr_diff_mean = np.abs(corr_diff.values[np.triu_indices_from(corr_diff.values, k=1)]).mean()
+                    
+                    self.writer.add_scalar('correlations/generated_original_mean_abs_corr', original_corr_mean, epoch)
+                    self.writer.add_scalar('correlations/generated_mean_abs_corr', generated_corr_mean, epoch)
+                    self.writer.add_scalar('correlations/generated_mean_abs_diff', corr_diff_mean, epoch)
+                    
+                    buf.close()
+                
+                plt.close()
+                
+                self.logger.info(f"Generated samples correlation analysis logged for epoch {epoch}")
+                
+        except Exception as e:
+            self.logger.warning(f"Failed to compute generated sample correlations at epoch {epoch}: {e}")
         
     def val_step(self, val_loader: DataLoader, epoch: int = 0) -> Dict[str, float]:
         """
@@ -514,13 +717,21 @@ class VAETrainer:
                     else:
                         concatenated_recon_cat.append(None)
                 
-                # Compute and log correlations
+                # Compute and log reconstruction correlations
                 self._compute_and_log_correlations(
                     concatenated_original_num, 
                     concatenated_original_cat,
                     concatenated_recon_num, 
                     concatenated_recon_cat, 
                     epoch
+                )
+                
+                # Generate new samples from latent space and compute correlations
+                self._generate_and_log_sample_correlations(
+                    concatenated_original_num,
+                    concatenated_original_cat,
+                    epoch,
+                    num_samples=concatenated_original_num.shape[0]
                 )
                 
             except Exception as e:
@@ -564,6 +775,7 @@ class VAETrainer:
                 'batch_size': self.config.training.batch_size,
                 'num_epochs': self.config.training.num_epochs,
                 'beta_max': self.config.training.beta_max,
+                'beta_min': self.config.training.beta_min,
                 'd_token': self.config.model.d_token,
                 'n_head': self.config.model.n_head,
                 'num_layers': self.config.model.num_layers,
@@ -586,6 +798,9 @@ class VAETrainer:
         
         for epoch in range(self.config.training.num_epochs):
             self.current_epoch = epoch
+            
+            # Update beta according to linear schedule
+            self.beta = self.beta_schedule[epoch]
             
             # Training step
             train_metrics = self.train_step(train_loader)
@@ -648,8 +863,8 @@ class VAETrainer:
                 if epoch % 5 == 0:  # Don't log too frequently to save space
                     for name, param in self.model.named_parameters():
                         if param.grad is not None:
-                            self.writer.add_histogram(f'params/{name}', param, epoch)
-                            self.writer.add_histogram(f'grads/{name}', param.grad, epoch)
+                            self._safe_log_histogram(f'params/{name}', param, epoch)
+                            self._safe_log_histogram(f'grads/{name}', param.grad, epoch)
             
             # Update learning rate based on validation loss
             self.scheduler.step(val_metrics['loss'])
@@ -666,12 +881,8 @@ class VAETrainer:
                     self.writer.add_scalar('best/val_loss', self.best_val_loss, epoch)
             else:
                 self.patience_counter += 1
-                if self.patience_counter >= self.config.training.early_stopping_patience:
-                    # Adjust beta for KL annealing
-                    if self.beta > self.config.training.beta_min:
-                        self.beta *= self.config.training.beta_decay_factor
-                        self.logger.info(f"Adjusted beta to {self.beta:.6f}")
-                        self.patience_counter = 0
+                # Note: Early stopping based on patience can be implemented here if desired
+                # For now, we continue training with the linear beta schedule
         
         training_time = (time.time() - start_time) / 60
         self.logger.info(f"Training completed in {training_time:.2f} minutes")
@@ -689,6 +900,7 @@ class VAETrainer:
                     'batch_size': self.config.training.batch_size,
                     'num_epochs': self.config.training.num_epochs,
                     'beta_max': self.config.training.beta_max,
+                    'beta_min': self.config.training.beta_min,
                 },
                 {
                     'hparam/best_val_loss': self.best_val_loss,

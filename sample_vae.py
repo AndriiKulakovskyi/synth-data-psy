@@ -5,6 +5,7 @@ import torch
 import pandas as pd
 import numpy as np
 
+from src.utils import load_config
 from src.data.clean import clean
 from src.data.wrangle import wrangle
 from src.data import split_numerical_categorical, reconstruct_decoded_dataframe
@@ -13,8 +14,6 @@ from src.trainer.vae_trainer import VAETrainer
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate synthetic data using a trained VAE")
-    parser.add_argument('--data_path', type=str, default='FACE/neuropsy_v0.csv',
-                        help='Path to the raw CSV used during training')
     parser.add_argument('--checkpoint', type=str, default='ckpt/model.pt',
                         help='Path to the trained VAE checkpoint')
     parser.add_argument('--num_samples', type=int, default=1000,
@@ -25,14 +24,17 @@ def parse_args() -> argparse.Namespace:
                         help='Number of wrangled columns used during training')
     parser.add_argument('--output', type=str, default='generated_samples/generated_data.csv',
                         help='Where to save the generated data CSV')
+    parser.add_argument('--config', type=str, default='config/vae_config.yaml',
+                        help='Path to configuration file')
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    config = load_config(args.config)
 
     # ─── load and preprocess dataset identically to training ────────────────
-    df_raw = pd.read_csv(args.data_path, sep=';', low_memory=False)
+    df_raw = pd.read_csv(config.data.train_data_path, sep=';', low_memory=False)
     # drop duplicated ID/visit columns if present
     cols_to_drop = [
         'usubjid_neuropsychologie',
@@ -61,6 +63,18 @@ def main() -> None:
     # ─── generate synthetic samples ─────────────────────────────────────────
     with torch.no_grad():
         x_num, x_cat = model.sample(args.num_samples, current_device=args.device)
+    
+    # save numpy arrays
+    np.save('generated_samples/x_num.npy', x_num.cpu().numpy())
+    cat_arrs = []
+    for cat in x_cat:
+        if isinstance(cat, torch.Tensor):
+            cat = cat.cpu().numpy()
+        if cat.ndim > 1:
+            cat = cat.argmax(axis=1)
+        cat_arrs.append(cat)
+    categorical_matrix = np.column_stack(cat_arrs)
+    np.save('generated_samples/x_cat.npy', categorical_matrix)
 
     # ─── reconstruct dataframe in original format ──────────────────────────
     df_generated = reconstruct_decoded_dataframe(
