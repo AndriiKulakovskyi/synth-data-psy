@@ -23,6 +23,7 @@ from langchain_core.output_parsers import StrOutputParser
 
 from sklearn.preprocessing import LabelEncoder, MinMaxScaler
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.impute import SimpleImputer, KNNImputer
 
 
 def load_data(path: str, drop_columns: List[str]) -> pd.DataFrame:
@@ -94,9 +95,8 @@ def get_unique_column_values(df: pd.DataFrame) -> dict:
                 return obj.tolist()
             return super(NumpyEncoder, self).default(obj)
 
-    with open('unique_data.json', 'w') as f:
-        json.dump(unique_data, f, cls=NumpyEncoder, indent=2)
     return unique_data
+
 
 def clean_and_convert_value(value):
         """Clean and convert a single value to numerical format."""
@@ -546,6 +546,406 @@ class MLDataTransformer:
             'transform_info': self.transform_info
         }
 
+def split_ml_data(df_ml_ready: pd.DataFrame, ml_transformer: MLDataTransformer = None) -> tuple:
+    """
+    Split ML-ready dataframe into numerical and categorical components.
+    
+    Parameters:
+    -----------
+    df_ml_ready : pd.DataFrame
+        ML-ready dataframe with encoded categorical and scaled numerical columns
+    ml_transformer : MLDataTransformer, optional
+        The fitted transformer object to get column type information
+    
+    Returns:
+    --------
+    tuple
+        (numerical_df, categorical_info_df) where:
+        - numerical_df: DataFrame with only numerical columns
+        - categorical_info_df: DataFrame with categorical columns and their category counts
+    """
+    
+    if ml_transformer is not None:
+        # Use transformer information if available
+        numerical_columns = ml_transformer.numerical_columns
+        categorical_columns = ml_transformer.categorical_columns
+    else:
+        # Fallback: detect based on data characteristics
+        numerical_columns = []
+        categorical_columns = []
+        
+        for column in df_ml_ready.columns:
+            # Skip columns with all NaN values
+            if df_ml_ready[column].isna().all():
+                continue
+            
+            # Check unique values and data type
+            unique_count = df_ml_ready[column].nunique()
+            
+            # Heuristic: if column has few unique values and they're integers, likely categorical
+            if unique_count <= 20 and df_ml_ready[column].dtype in ['int64', 'Int64', 'float64']:
+                # Check if values look like encoded categories (0, 1, 2, etc.)
+                non_null_values = df_ml_ready[column].dropna()
+                if len(non_null_values) > 0:
+                    min_val = non_null_values.min()
+                    max_val = non_null_values.max()
+                    # If values are in range [0, unique_count-1] and mostly integers, likely categorical
+                    if min_val >= 0 and max_val < unique_count * 1.5:
+                        categorical_columns.append(column)
+                    else:
+                        numerical_columns.append(column)
+                else:
+                    numerical_columns.append(column)
+            else:
+                numerical_columns.append(column)
+    
+    # Create numerical dataframe
+    numerical_df = df_ml_ready[numerical_columns].copy()
+    
+    # Create categorical dataframe with category information
+    categorical_data = []
+    for column in categorical_columns:
+        if column in df_ml_ready.columns:
+            unique_count = df_ml_ready[column].nunique()
+            unique_values = sorted(df_ml_ready[column].dropna().unique())
+            
+            # Get original category names if transformer is available
+            original_categories = None
+            if ml_transformer is not None and column in ml_transformer.transform_info:
+                if ml_transformer.transform_info[column]['type'] == 'categorical':
+                    original_categories = ml_transformer.transform_info[column]['classes']
+            
+            categorical_data.append({
+                'column_name': column,
+                'num_categories': unique_count,
+                'encoded_values': unique_values,
+                'original_categories': original_categories if original_categories else 'Not available'
+            })
+    
+    # Create categorical info dataframe
+    if categorical_data:
+        categorical_info_df = pd.DataFrame(categorical_data)
+    else:
+        categorical_info_df = pd.DataFrame(columns=['column_name', 'num_categories', 'encoded_values', 'original_categories'])
+    
+    # Also create a dataframe with just the categorical columns and their data
+    categorical_df = df_ml_ready[categorical_columns].copy() if categorical_columns else pd.DataFrame()
+    
+    print(f"Data split summary:")
+    print(f"- Numerical columns: {len(numerical_columns)}")
+    print(f"- Categorical columns: {len(categorical_columns)}")
+    print(f"- Total columns: {len(numerical_columns) + len(categorical_columns)}")
+    
+    return numerical_df, categorical_df, categorical_info_df
+
+
+def analyze_categorical_distribution(categorical_df: pd.DataFrame, categorical_info_df: pd.DataFrame, 
+                                   save_folder: str = None) -> pd.DataFrame:
+    """
+    Analyze the distribution of categorical variables.
+    
+    Parameters:
+    -----------
+    categorical_df : pd.DataFrame
+        DataFrame with categorical columns
+    categorical_info_df : pd.DataFrame
+        DataFrame with categorical column information
+    save_folder : str, optional
+        Folder to save the analysis results
+    
+    Returns:
+    --------
+    pd.DataFrame
+        Distribution analysis for each categorical column
+    """
+    
+    distribution_analysis = []
+    
+    for _, row in categorical_info_df.iterrows():
+        column_name = row['column_name']
+        
+        if column_name in categorical_df.columns:
+            # Get value counts
+            value_counts = categorical_df[column_name].value_counts().sort_index()
+            total_count = categorical_df[column_name].count()
+            
+            # Calculate percentages
+            percentages = (value_counts / total_count * 100).round(2)
+            
+            # Create distribution info
+            distribution_info = {
+                'column_name': column_name,
+                'total_non_null': total_count,
+                'num_categories': row['num_categories'],
+                'most_frequent_value': value_counts.index[0] if len(value_counts) > 0 else None,
+                'most_frequent_count': value_counts.iloc[0] if len(value_counts) > 0 else 0,
+                'most_frequent_percentage': percentages.iloc[0] if len(percentages) > 0 else 0,
+                'distribution': dict(zip(value_counts.index, value_counts.values)),
+                'percentage_distribution': dict(zip(percentages.index, percentages.values))
+            }
+            
+            distribution_analysis.append(distribution_info)
+    
+    distribution_df = pd.DataFrame(distribution_analysis)
+    
+    # Save analysis if folder is provided
+    if save_folder and not distribution_df.empty:
+        Path(save_folder).mkdir(parents=True, exist_ok=True)
+        distribution_df.to_csv(f'{save_folder}/categorical_distribution_analysis.csv', sep=';', index=False)
+        print(f"Categorical distribution analysis saved to '{save_folder}/categorical_distribution_analysis.csv'")
+    
+    return distribution_df
+
+def impute_missing_data(numerical_df: pd.DataFrame, categorical_df: pd.DataFrame, 
+                       numerical_strategy: str = 'median', categorical_strategy: str = 'most_frequent',
+                       knn_neighbors: int = 5, save_folder: str = None) -> tuple:
+    """
+    Impute missing values in numerical and categorical dataframes.
+    
+    Parameters:
+    -----------
+    numerical_df : pd.DataFrame
+        DataFrame with numerical columns containing missing values
+    categorical_df : pd.DataFrame  
+        DataFrame with categorical columns containing missing values
+    numerical_strategy : str
+        Strategy for numerical imputation: 'mean', 'median', 'most_frequent', 'constant', 'knn'
+    categorical_strategy : str
+        Strategy for categorical imputation: 'most_frequent', 'constant', 'forward_fill', 'backward_fill'
+    knn_neighbors : int
+        Number of neighbors for KNN imputation (only used if numerical_strategy='knn')
+    save_folder : str, optional
+        Folder to save imputation parameters
+    
+    Returns:
+    --------
+    tuple
+        (numerical_imputed, categorical_imputed, imputation_info) where:
+        - numerical_imputed: DataFrame with imputed numerical values
+        - categorical_imputed: DataFrame with imputed categorical values  
+        - imputation_info: Dictionary containing imputation parameters for reproducibility
+    """
+    
+    imputation_info = {
+        'numerical_strategy': numerical_strategy,
+        'categorical_strategy': categorical_strategy,
+        'numerical_imputers': {},
+        'categorical_imputers': {},
+        'missing_counts_before': {},
+        'missing_counts_after': {}
+    }
+    
+    # Record missing counts before imputation
+    if not numerical_df.empty:
+        imputation_info['missing_counts_before']['numerical'] = numerical_df.isnull().sum().to_dict()
+    if not categorical_df.empty:
+        imputation_info['missing_counts_before']['categorical'] = categorical_df.isnull().sum().to_dict()
+    
+    print("Starting missing data imputation...")
+    print(f"Numerical strategy: {numerical_strategy}")
+    print(f"Categorical strategy: {categorical_strategy}")
+    
+    # Impute numerical data
+    numerical_imputed = numerical_df.copy()
+    if not numerical_df.empty and numerical_df.isnull().any().any():
+        print(f"\nImputing numerical data ({numerical_df.shape[1]} columns)...")
+        
+        if numerical_strategy == 'knn':
+            # Use KNN imputation
+            knn_imputer = KNNImputer(n_neighbors=knn_neighbors)
+            numerical_imputed.iloc[:, :] = knn_imputer.fit_transform(numerical_df)
+            imputation_info['numerical_imputers']['knn'] = {
+                'n_neighbors': knn_neighbors,
+                'feature_names': numerical_df.columns.tolist()
+            }
+            print(f"Applied KNN imputation with {knn_neighbors} neighbors")
+            
+        else:
+            # Use SimpleImputer for other strategies
+            if numerical_strategy == 'constant':
+                fill_value = 0  # Can be customized
+                imputer = SimpleImputer(strategy='constant', fill_value=fill_value)
+                imputation_info['numerical_imputers']['constant_value'] = fill_value
+            else:
+                imputer = SimpleImputer(strategy=numerical_strategy)
+            
+            numerical_imputed.iloc[:, :] = imputer.fit_transform(numerical_df)
+            
+            # Store imputation values for each column
+            if hasattr(imputer, 'statistics_'):
+                imputation_info['numerical_imputers']['values'] = dict(zip(
+                    numerical_df.columns, imputer.statistics_
+                ))
+            
+            print(f"Applied {numerical_strategy} imputation to {numerical_df.shape[1]} columns")
+    
+    # Impute categorical data
+    categorical_imputed = categorical_df.copy()
+    if not categorical_df.empty and categorical_df.isnull().any().any():
+        print(f"\nImputing categorical data ({categorical_df.shape[1]} columns)...")
+        
+        if categorical_strategy == 'most_frequent':
+            # Use mode imputation
+            imputer = SimpleImputer(strategy='most_frequent')
+            categorical_imputed.iloc[:, :] = imputer.fit_transform(categorical_df)
+            
+            # Store the most frequent values
+            imputation_info['categorical_imputers']['most_frequent_values'] = dict(zip(
+                categorical_df.columns, imputer.statistics_
+            ))
+            print(f"Applied most frequent imputation to {categorical_df.shape[1]} columns")
+            
+        elif categorical_strategy == 'constant':
+            # Use constant value (e.g., -1 for unknown category)
+            fill_value = -1
+            imputer = SimpleImputer(strategy='constant', fill_value=fill_value)
+            categorical_imputed.iloc[:, :] = imputer.fit_transform(categorical_df)
+            imputation_info['categorical_imputers']['constant_value'] = fill_value
+            print(f"Applied constant value ({fill_value}) imputation")
+            
+        elif categorical_strategy == 'forward_fill':
+            # Forward fill
+            categorical_imputed = categorical_df.fillna(method='ffill')
+            print("Applied forward fill imputation")
+            
+        elif categorical_strategy == 'backward_fill':
+            # Backward fill
+            categorical_imputed = categorical_df.fillna(method='bfill')
+            print("Applied backward fill imputation")
+        
+        # For any remaining NaN values after forward/backward fill, use most frequent
+        if categorical_strategy in ['forward_fill', 'backward_fill'] and categorical_imputed.isnull().any().any():
+            print("Filling remaining NaN values with most frequent values...")
+            for column in categorical_imputed.columns:
+                if categorical_imputed[column].isnull().any():
+                    mode_value = categorical_imputed[column].mode()
+                    if len(mode_value) > 0:
+                        categorical_imputed[column].fillna(mode_value[0], inplace=True)
+                    else:
+                        categorical_imputed[column].fillna(-1, inplace=True)  # Fallback
+    
+    # Record missing counts after imputation
+    if not numerical_imputed.empty:
+        imputation_info['missing_counts_after']['numerical'] = numerical_imputed.isnull().sum().to_dict()
+    if not categorical_imputed.empty:
+        imputation_info['missing_counts_after']['categorical'] = categorical_imputed.isnull().sum().to_dict()
+    
+    # Print summary
+    print("\nImputation completed!")
+    if not numerical_df.empty:
+        missing_before_num = numerical_df.isnull().sum().sum()
+        missing_after_num = numerical_imputed.isnull().sum().sum()
+        print(f"Numerical data: {missing_before_num} → {missing_after_num} missing values")
+    
+    if not categorical_df.empty:
+        missing_before_cat = categorical_df.isnull().sum().sum()
+        missing_after_cat = categorical_imputed.isnull().sum().sum()
+        print(f"Categorical data: {missing_before_cat} → {missing_after_cat} missing values")
+    
+    # Save imputation info
+    if save_folder:
+        try:
+            Path(save_folder).mkdir(parents=True, exist_ok=True)
+            with open(f'{save_folder}/imputation_info.json', 'w') as f:
+                # Convert numpy types to native Python types for JSON serialization
+                json_safe_info = {}
+                for key, value in imputation_info.items():
+                    if isinstance(value, dict):
+                        json_safe_info[key] = {k: float(v) if isinstance(v, (np.floating, np.integer)) else v 
+                                             for k, v in value.items()}
+                    else:
+                        json_safe_info[key] = value
+                
+                json.dump(json_safe_info, f, indent=2)
+            print(f"Imputation info saved to '{save_folder}/imputation_info.json'")
+        except Exception as e:
+            print(f"Warning: Could not save imputation info: {e}")
+    
+    return numerical_imputed, categorical_imputed, imputation_info
+
+
+def analyze_missing_data(numerical_df: pd.DataFrame, categorical_df: pd.DataFrame, 
+                        save_folder: str = None) -> pd.DataFrame:
+    """
+    Analyze missing data patterns in numerical and categorical dataframes.
+    
+    Parameters:
+    -----------
+    numerical_df : pd.DataFrame
+        DataFrame with numerical columns
+    categorical_df : pd.DataFrame
+        DataFrame with categorical columns
+    save_folder : str, optional
+        Folder to save the analysis
+    
+    Returns:
+    --------
+    pd.DataFrame
+        Missing data analysis summary
+    """
+    
+    missing_analysis = []
+    
+    # Analyze numerical columns
+    if not numerical_df.empty:
+        for column in numerical_df.columns:
+            missing_count = numerical_df[column].isnull().sum()
+            total_count = len(numerical_df)
+            missing_percentage = (missing_count / total_count) * 100
+            
+            missing_analysis.append({
+                'column_name': column,
+                'data_type': 'numerical',
+                'total_rows': total_count,
+                'missing_count': missing_count,
+                'missing_percentage': round(missing_percentage, 2),
+                'non_missing_count': total_count - missing_count
+            })
+    
+    # Analyze categorical columns  
+    if not categorical_df.empty:
+        for column in categorical_df.columns:
+            missing_count = categorical_df[column].isnull().sum()
+            total_count = len(categorical_df)
+            missing_percentage = (missing_count / total_count) * 100
+            
+            missing_analysis.append({
+                'column_name': column,
+                'data_type': 'categorical',
+                'total_rows': total_count,
+                'missing_count': missing_count,
+                'missing_percentage': round(missing_percentage, 2),
+                'non_missing_count': total_count - missing_count
+            })
+    
+    missing_df = pd.DataFrame(missing_analysis)
+    
+    if not missing_df.empty:
+        # Sort by missing percentage descending
+        missing_df = missing_df.sort_values('missing_percentage', ascending=False)
+        
+        # Save analysis
+        if save_folder:
+            Path(save_folder).mkdir(parents=True, exist_ok=True)
+            missing_df.to_csv(f'{save_folder}/missing_data_analysis.csv', sep=';', index=False)
+            print(f"Missing data analysis saved to '{save_folder}/missing_data_analysis.csv'")
+        
+        # Print summary
+        print("\nMissing Data Analysis Summary:")
+        print(f"Total columns analyzed: {len(missing_df)}")
+        columns_with_missing = missing_df[missing_df['missing_count'] > 0]
+        print(f"Columns with missing data: {len(columns_with_missing)}")
+        
+        if len(columns_with_missing) > 0:
+            print(f"Highest missing percentage: {columns_with_missing['missing_percentage'].max():.2f}%")
+            print(f"Average missing percentage: {columns_with_missing['missing_percentage'].mean():.2f}%")
+            
+            print("\nTop 10 columns with most missing data:")
+            top_missing = columns_with_missing.head(10)[['column_name', 'data_type', 'missing_percentage']]
+            print(top_missing.to_string(index=False))
+    
+    return missing_df
+
 if __name__ == "__main__":
     folder_path = 'FACE/processed'
     Path(folder_path).mkdir(parents=True, exist_ok=True)
@@ -569,53 +969,70 @@ if __name__ == "__main__":
     ml_transformer = MLDataTransformer(categorical_threshold=10, save_transforms=True, save_folder=folder_path)
     data_ml_ready = ml_transformer.fit_transform(data_numerical)
     
-    print(f"\nDataframe shape after ML transformations: {data_ml_ready.shape}")
-    print("\nFeature transformation summary:")
-    feature_info = ml_transformer.get_feature_info()
-    print(f"- Categorical columns: {len(feature_info['categorical_columns'])}")
-    print(f"- Numerical columns: {len(feature_info['numerical_columns'])}")
-    print(f"- Total features: {feature_info['total_features']}")
+    numerical_df, categorical_df, categorical_info_df = split_ml_data(data_ml_ready, ml_transformer)
+    
+    # Save the split data
+    if not numerical_df.empty:
+        numerical_df.to_csv(f'{folder_path}/numerical_data.csv', sep=';', index=False)
+        print(f"Numerical data saved to '{folder_path}/numerical_data.csv'")
+    
+    if not categorical_df.empty:
+        categorical_df.to_csv(f'{folder_path}/categorical_data.csv', sep=';', index=False)
+        print(f"Categorical data saved to '{folder_path}/categorical_data.csv'")
+    
+    if not categorical_info_df.empty:
+        categorical_info_df.to_csv(f'{folder_path}/categorical_info.csv', sep=';', index=False)
+        print(f"Categorical info saved to '{folder_path}/categorical_info.csv'")
+        
+        print("\nCategorical columns summary:")
+        for _, row in categorical_info_df.iterrows():
+            print(f"- {row['column_name']}: {row['num_categories']} categories")
+    
+    # Analyze categorical distributions
+    if not categorical_df.empty:
+        print("\nAnalyzing categorical distributions...")
+        distribution_analysis = analyze_categorical_distribution(categorical_df, categorical_info_df, folder_path)
+        
+        if not distribution_analysis.empty:
+            print("\nTop categorical columns by number of categories:")
+            top_categorical = distribution_analysis.nlargest(5, 'num_categories')[['column_name', 'num_categories', 'most_frequent_percentage']]
+            print(top_categorical.to_string(index=False))
 
-    correlation_matrix = data_ml_ready.corr(method='pearson')
-
-    # Visualize the correlation matrix using a heatmap
-    plt.figure(figsize=(20, 20))  # Adjust figure size as needed
-    sns.heatmap(correlation_matrix, annot=False, cmap='coolwarm', center=0)
-    plt.title("Correlation Matrix Heatmap")
-    plt.tight_layout()  # Ensure proper layout
-    
-    # Save the figure BEFORE showing it
-    plt.savefig(f'{folder_path}/correlation_matrix.png', dpi=300, bbox_inches='tight')
-    print(f"Correlation matrix heatmap saved to '{folder_path}/correlation_matrix.png'")
-    
-    # Show the plot after saving
-    plt.show()
-    
-    # Apply ML transformations
+    # Analyze missing data before imputation
     print("\n" + "="*50)
-    print("APPLYING ML TRANSFORMATIONS")
+    print("ANALYZING MISSING DATA")
     print("="*50)
     
-    # Save the ML-ready dataset
-    data_ml_ready.to_csv(f'{folder_path}/data_ml_ready.csv', sep=';', index=False)
-    print(f"\nML-ready dataset saved to '{folder_path}/data_ml_ready.csv'")
-
+    missing_analysis_before = analyze_missing_data(numerical_df, categorical_df, save_folder=folder_path)
     
-    # Demonstrate inverse transformation
-    print("\nDemonstrating inverse transformation...")
-    sample_data = data_ml_ready.head(5)  # Take first 5 rows
-    reconstructed_data = ml_transformer.inverse_transform(sample_data)
+    # Impute missing data
+    print("\n" + "="*50)
+    print("IMPUTING MISSING DATA") 
+    print("="*50)
     
-    print("Original sample (first 3 columns):")
-    print(data_numerical.head(5).iloc[:, :3])
-    print("\nTransformed sample (first 3 columns):")
-    print(sample_data.iloc[:, :3])
-    print("\nReconstructed sample (first 3 columns):")
-    print(reconstructed_data.iloc[:, :3])
+    numerical_imputed, categorical_imputed, imputation_info = impute_missing_data(
+        numerical_df, categorical_df, 
+        numerical_strategy='median', 
+        categorical_strategy='most_frequent',
+        knn_neighbors=5,
+        save_folder=folder_path
+    )
+    
+    # Save imputed datasets
+    if not numerical_imputed.empty:
+        numerical_imputed.to_csv(f'{folder_path}/numerical_data_imputed.csv', sep=';', index=False)
+        print(f"Imputed numerical data saved to '{folder_path}/numerical_data_imputed.csv'")
+    
+    if not categorical_imputed.empty:
+        categorical_imputed.to_csv(f'{folder_path}/categorical_data_imputed.csv', sep=';', index=False)
+        print(f"Imputed categorical data saved to '{folder_path}/categorical_data_imputed.csv'")
+    
+    # Verify imputation results
+    print("\n" + "="*50)
+    print("VERIFYING IMPUTATION RESULTS")
+    print("="*50)
+    
+    missing_analysis_after = analyze_missing_data(numerical_imputed, categorical_imputed, save_folder=folder_path)
 
-    unique_column_values = get_unique_column_values(data_numerical)
-
-    with open(f'{folder_path}/unique_column_values.json', 'w') as f:
-        json.dump(unique_column_values, f, indent=2)
 
     
