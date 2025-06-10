@@ -1,220 +1,301 @@
 # Tabular VAE for Psychiatric Data
 
-A Variational Autoencoder (VAE) implementation for tabular psychiatric data. This repository contains code for training a VAE on mixed numerical and categorical data.
+A modern Variational Autoencoder (VAE) implementation designed for mixed tabular data containing both numerical and categorical features. This project provides a complete pipeline from data preprocessing to VAE training with comprehensive monitoring and evaluation capabilities.
 
-## Features
+## Architecture Overview
 
-- Handles mixed numerical and categorical features
-- Configurable VAE architecture with attention mechanism
-- Separate train and validation steps with metrics tracking
-- Automatic model checkpointing and early stopping
-- KL divergence annealing for better convergence
-- Extracts and saves latent embeddings
-- Hardware acceleration support (CUDA for NVIDIA GPUs and MPS for Apple Silicon)
+The project is structured around three main components:
+
+### 1. **Data Preprocessing Pipeline** (`preprocessing.py`)
+- **MLDataTransformer**: Intelligent data type detection and transformation
+- **Missing Data Analysis**: Comprehensive missing value detection and visualization
+- **Imputation**: Multiple strategies for numerical (median, mean, KNN) and categorical (mode, KNN) data
+- **Output**: Produces `numerical_data_imputed.csv`, `categorical_data_imputed.csv`, and `categorical_info.csv`
+
+### 2. **VAE Model Architecture** (`src/ldm/vae/`)
+- **Encoder** (`encoder.py`): Transformer-based encoder with attention mechanism
+- **Decoder** (`decoder.py`): Transformer-based decoder for reconstruction
+- **Core** (`core.py`): Transformer blocks with multi-head attention and feed-forward layers
+- **Model** (`model.py`): Complete VAE implementation with reparameterization trick
+
+### 3. **Training Framework** (`src/trainer/vae.py`)
+- **VAETrainer**: Comprehensive training loop with modern PyTorch practices
+- **Beta Scheduling**: Linear annealing of KL divergence weight over epochs
+- **Correlation Analysis**: Automated analysis comparing real vs reconstructed data correlations
+- **Checkpointing**: Automatic model saving with best model selection
+
+## Key Features
+
+### Data Handling
+- **Mixed Data Types**: Handles both numerical and categorical features seamlessly
+- **Intelligent Imputation**: KNN and statistical imputation methods
+- **Data Validation**: Comprehensive checks for data integrity and missing values
+- **Reproducible Preprocessing**: Saves transformation parameters for consistent application
+
+### Model Architecture
+- **Transformer-Based VAE**: Uses attention mechanisms for better feature relationships
+- **Token-Based Representation**: Each feature is represented as a token with learned embeddings
+- **Configurable Architecture**: Easily adjustable layers, heads, dimensions, and factors
+- **Hardware Optimization**: Supports CUDA, MPS (Apple Silicon), and CPU training
+
+### Training Features
+- **Beta Annealing**: Gradual increase of KL weight for stable training
+- **Early Stopping**: Prevents overfitting with validation-based stopping
+- **Learning Rate Scheduling**: Adaptive learning rate based on validation loss
+- **Comprehensive Logging**: TensorBoard integration with detailed metrics
+
+### Monitoring & Analysis
+- **Real-time Metrics**: Loss components (MSE, Cross-entropy, KL divergence)
+- **Correlation Analysis**: Periodic comparison of data correlations (real vs reconstructed)
+- **TensorBoard Integration**: Visual monitoring of training progress
+- **Model Checkpointing**: Automatic saving of best models and training states
 
 ## Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/synth-data-psy.git
+git clone <repository-url>
 cd synth-data-psy
 
-# Install dependencies (requires Python 3.7+)
+# Install dependencies (Python 3.8+)
 pip install -r requirements.txt
 ```
 
-## Usage
+## Quick Start
 
-### Configuration
+### 1. Data Preprocessing
 
-The training parameters are stored in the YAML configuration file at `config/vae_config.yaml`. You can customize these settings to adjust the model architecture, training parameters, and data processing steps.
+First, prepare your data using the preprocessing pipeline:
 
-### Training the VAE
+```python
+from preprocessing import MLDataTransformer, impute_missing_data, split_ml_data
 
-```bash
-# Basic usage with default configuration
-python train_vae.py
+# Load and preprocess data
+transformer = MLDataTransformer(categorical_threshold=10, save_folder='DATA/processed')
+df_processed = transformer.fit_transform(raw_data)
 
-# Using a custom configuration file
-python train_vae.py --config path/to/custom_config.yaml
+# Split into numerical and categorical
+numerical_df, categorical_df, categorical_info_df = split_ml_data(df_processed, transformer)
 
-# Override specific configuration settings
-python train_vae.py --data_path data/your_data.csv --device cuda:0 --batch_size 128 --epochs 1000
-
-# Using Apple Silicon GPU acceleration
-python train_vae.py --device mps
+# Impute missing values
+numerical_imputed, categorical_imputed = impute_missing_data(
+    numerical_df, categorical_df, 
+    numerical_strategy='knn', 
+    categorical_strategy='most_frequent',
+    save_folder='DATA/processed'
+)
 ```
 
-### Command Line Arguments
+### 2. VAE Training
 
-- `--config`: Path to the configuration file (default: `config/vae_config.yaml`)
-- `--data_path`: Override the data path specified in the config file
-- `--device`: Override the device (e.g., 'cpu', 'cuda:0', 'mps' for Apple Silicon)
-- `--checkpoint_dir`: Override the checkpoint directory
-- `--batch_size`: Override the training batch size
-- `--epochs`: Override the number of training epochs
-- `--seed`: Override the random seed for reproducibility
+Train the VAE model using the preprocessed data:
+
+```bash
+# Basic training with default configuration
+python train_vae.py --data_folder DATA/processed
+
+# Custom configuration
+python train_vae.py --config config/custom_config.yaml --data_folder DATA/processed
+
+# Hardware-specific training
+python train_vae.py --device cuda:0    # NVIDIA GPU
+python train_vae.py --device mps       # Apple Silicon
+python train_vae.py --device cpu       # CPU only
+```
+
+### 3. Monitor Training
+
+Track training progress with TensorBoard:
+
+```bash
+tensorboard --logdir=runs
+```
 
 ## Project Structure
 
 ```
-├── config/
-│   └── vae_config.yaml   # Training configuration
-├── logs/                 # Training logs
-├── ckpt/                 # Model checkpoints
-├── data/                 # Data files
+synth-data-psy/
 ├── src/
-│   ├── data/             # Data processing modules
-│   ├── ldm/              # Model architecture
-│   ├── trainer/          # Training loop implementation
-│   └── utils/            # Utility functions
-├── train_vae.py          # Main training script
-└── README.md             # This file
+│   ├── data/
+│   │   └── dataset.py              # PyTorch dataset for mixed tabular data
+│   ├── ldm/vae/
+│   │   ├── core.py                 # Transformer building blocks
+│   │   ├── encoder.py              # VAE encoder with attention
+│   │   ├── decoder.py              # VAE decoder for reconstruction
+│   │   └── model.py                # Complete VAE model
+│   └── trainer/
+│       └── vae.py                  # Training loop and utilities
+├── config/
+│   └── vae_config.yaml             # Training configuration
+├── preprocessing.py                # Data preprocessing pipeline
+├── train_vae.py                    # Main training script
+├── requirements.txt                # Python dependencies
+└── README.md                       # This file
 ```
 
-## Training the Model
+## Configuration
 
-### Starting the Training Process
+The training configuration is managed through YAML files in the `config/` directory:
 
-To start training the VAE model, use the following command:
+```yaml
+model:
+  num_layers: 2        # Number of transformer layers
+  d_token: 16          # Token dimension
+  n_head: 1            # Number of attention heads
+  factor: 32           # Feed-forward expansion factor
+  token_bias: true     # Use bias in token embeddings
+
+training:
+  batch_size: 512      # Training batch size
+  num_epochs: 400      # Maximum epochs
+  learning_rate: 0.001 # Initial learning rate
+  weight_decay: 0      # L2 regularization
+  beta:
+    min: 0.001         # Initial KL weight
+    max: 0.15          # Final KL weight
+  early_stopping_patience: 400  # Early stopping patience
+  scheduler_patience: 10        # LR scheduler patience
+  scheduler_factor: 0.95        # LR reduction factor
+
+correlation_freq: 5    # Correlation analysis frequency (epochs)
+checkpoint_dir: ckpt   # Checkpoint directory
+seed: 42              # Random seed
+```
+
+## How It Works
+
+### Data Flow
+
+1. **Raw Data** → **Preprocessing Pipeline**:
+   - Automatic column type detection (numerical vs categorical)
+   - Missing data analysis and visualization
+   - Intelligent imputation based on data characteristics
+   - Data validation and integrity checks
+
+2. **Preprocessed Data** → **Dataset Creation**:
+   - Separate numerical and categorical tensors
+   - Categorical encoding information preservation
+   - PyTorch dataset wrapper for efficient loading
+
+3. **Dataset** → **VAE Training**:
+   - Token-based representation of features
+   - Attention mechanism for feature relationships
+   - Beta-scheduled KL divergence annealing
+   - Comprehensive loss tracking and validation
+
+### VAE Architecture Details
+
+The VAE uses a transformer-based architecture where:
+
+- **Input Processing**: Each feature (numerical or categorical) becomes a token
+- **Encoder**: Multi-layer transformer that outputs latent mean (μ) and log-variance (σ²)
+- **Reparameterization**: Samples latent vectors using μ + σ × ε (ε ~ N(0,1))
+- **Decoder**: Multi-layer transformer that reconstructs original features from latent vectors
+
+### Loss Function
+
+The total loss combines three components:
+
+```
+L_total = L_reconstruction + β × L_KL
+
+where:
+- L_reconstruction = MSE(numerical) + CrossEntropy(categorical)
+- L_KL = KL_divergence(latent_distribution || N(0,1))
+- β = linearly annealed weight (min → max over epochs)
+```
+
+### Training Process
+
+1. **Initialization**: Model, optimizer, scheduler, and data loaders
+2. **Training Loop**: 
+   - Forward pass through encoder-decoder
+   - Loss computation with current β value
+   - Backpropagation with gradient clipping
+   - Learning rate scheduling based on validation loss
+3. **Validation**: Model evaluation without gradient updates
+4. **Monitoring**: 
+   - TensorBoard logging of all metrics
+   - Periodic correlation analysis between real and reconstructed data
+   - Automatic checkpointing of best models
+
+### Outputs
+
+After training, the following artifacts are generated:
+
+- **Model Checkpoints**: Complete model state for resuming training
+- **Best Model**: Best performing model based on validation loss
+- **TensorBoard Logs**: Comprehensive training metrics and visualizations
+- **Correlation Analysis**: Heatmaps comparing real vs reconstructed data correlations
+
+## Advanced Usage
+
+### Custom Data Preprocessing
+
+```python
+# Custom preprocessing with specific parameters
+transformer = MLDataTransformer(
+    categorical_threshold=5,  # Treat features with ≤5 unique values as categorical
+    save_transforms=True,     # Save transformation parameters
+    save_folder='custom_processed'
+)
+
+# Apply custom imputation strategies
+numerical_imputed, categorical_imputed = impute_missing_data(
+    numerical_df, categorical_df,
+    numerical_strategy='knn',           # KNN imputation for numerical
+    categorical_strategy='most_frequent', # Mode imputation for categorical
+    knn_neighbors=10,                   # Number of neighbors for KNN
+    save_folder='custom_processed'
+)
+```
+
+### Model Sampling
+
+After training, generate synthetic samples:
+
+```python
+from src.ldm.vae.model import VAE
+
+# Load trained model
+model = VAE(...)
+model.load_state_dict(torch.load('ckpt/best_model.pt')['model_state_dict'])
+model.eval()
+
+# Generate samples
+num_samples = 1000
+synthetic_numerical, synthetic_categorical = model.sample(num_samples, device)
+```
+
+### Custom Training Configuration
+
+Override configuration parameters via command line:
 
 ```bash
-# Basic training with default configuration
-python train_vae.py
-
-# Training with custom configuration
-python train_vae.py --config path/to/custom_config.yaml
-
-# Training with specific hardware
-python train_vae.py --device cuda:0  # For NVIDIA GPU
-python train_vae.py --device mps     # For Apple Silicon GPU
-python train_vae.py --device cpu     # For CPU training
+python train_vae.py \
+    --data_folder custom_data/ \
+    --batch_size 256 \
+    --epochs 500 \
+    --correlation_freq 10 \
+    --device cuda:1
 ```
 
-### Monitoring Training with TensorBoard
+## Troubleshooting
 
-Training progress is automatically logged to TensorBoard. To monitor the training:
+### Common Issues
 
-1. Install TensorBoard if you haven't already:
-   ```bash
-   pip install tensorboard
-   ```
+1. **CUDA Out of Memory**: Reduce `batch_size` in configuration
+2. **Slow Training**: Use GPU acceleration (`--device cuda:0` or `--device mps`)
+3. **Poor Reconstruction**: Increase model capacity (`d_token`, `num_layers`) or training epochs
+4. **Missing Data Files**: Ensure preprocessing pipeline completed successfully
 
-2. In a separate terminal, start TensorBoard:
-   ```bash
-   tensorboard --logdir=./runs
-   ```
+### Monitoring Training Health
 
-3. Open your web browser and navigate to the URL shown in the terminal (typically http://localhost:6006/)
-
-#### Key Metrics to Monitor
-
-- **Losses**:
-  - `train/loss`: Total training loss (MSE + CE + β*KL)
-  - `val/loss`: Total validation loss
-  - `train/mse_loss`: Mean Squared Error for numerical features
-  - `train/ce_loss`: Cross-Entropy loss for categorical features
-  - `train/kl_loss`: KL Divergence between latent distribution and standard normal
-
-- **Hyperparameters**:
-  - `hyperparams/lr`: Learning rate over time
-  - `hyperparams/beta`: KL weight (β) value during training
-
-- **Model Statistics**:
-  - Parameter histograms (updated every 5 epochs)
-  - Gradient histograms (updated every 5 epochs)
-  - Model graph (available after first forward pass)
-
-### Sampling from the Trained Model
-
-After training, you can generate synthetic samples using the trained model:
-
-1. Load the trained decoder:
-   ```python
-   from src.ldm.vae.model import Decoder_model
-   import torch
-   
-   # Initialize decoder with the same architecture as training
-   decoder = Decoder_model(
-       num_layers=config.model.num_layers,
-       d_numerical=your_numerical_dim,
-       categories=your_categories_list,
-       d_token=config.model.d_token,
-       n_head=config.model.n_head,
-       factor=config.model.factor
-   ).to(device)
-   
-   # Load trained weights
-   decoder.load_state_dict(torch.load('ckpt/decoder.pt'))
-   decoder.eval()
-   ```
-
-2. Generate samples:
-   ```python
-   def generate_samples(decoder, num_samples, latent_dim, device='cuda'):
-       with torch.no_grad():
-           # Sample from standard normal distribution
-           z = torch.randn(num_samples, latent_dim).to(device)
-           
-           # Generate samples
-           num_recon, cat_recon = decoder(z)
-           
-           # Convert to numpy if needed
-           num_samples = num_recon.cpu().numpy()
-           cat_samples = [t.argmax(dim=-1).cpu().numpy() for t in cat_recon]
-           
-           return num_samples, cat_samples
-   
-   # Generate 10 samples
-   num_samples, cat_samples = generate_samples(decoder, num_samples=10, latent_dim=config.model.d_token)
-   ```
-
-### VAE Sanity Check
-
-After training your VAE model, you can perform a sanity check to analyze the learned latent space using the `vae_sanity.py` script:
-
-```bash
-python vae_sanity.py --checkpoint ckpt/model.pt --config config/vae_config.yaml
-```
-
-This script will:
-- Load your trained VAE model
-- Encode the entire training dataset
-- Plot the latent distribution (2D scatter plot, histograms, correlation matrix)
-- Print detailed statistics about the latent space
-
-**What to look for:**
-- **μ (mean) values** should be centered around 0
-- **σ² (variance) values** should be close to 1
-- The latent distribution should approximate a standard normal distribution
-- Low correlation between latent dimensions indicates good disentanglement
-
-**Common issues:**
-- If μ is far from 0: The model hasn't learned to use the prior well
-- If σ² << 1: The latent space is "collapsed" (posterior collapse)
-- If σ² >> 1: The latent space is "expanded" 
-- High correlation: Redundancy between latent dimensions
-
-**Options:**
-```bash
-python vae_sanity.py --help
-# --checkpoint: Path to model checkpoint (default: ckpt/model.pt)
-# --config: Path to config file (default: config/vae_config.yaml)  
-# --device: Device to use (default: auto)
-# --max_samples: Max samples to analyze for memory efficiency (default: 5000)
-```
-
-## Output Files
-
-After training, the following files will be saved:
-
-- `ckpt/model.pt`: Complete VAE model
-- `ckpt/encoder.pt`: Encoder part for generating embeddings
-- `ckpt/decoder.pt`: Decoder part for generating synthetic data
-- `ckpt/train_z.npy`: Latent embeddings of the training data
-- `runs/`: Directory containing TensorBoard logs
-- `logs/`: Directory containing training logs
+- **KL Loss**: Should gradually increase as β increases
+- **Reconstruction Loss**: Should steadily decrease
+- **Validation Loss**: Should improve without diverging from training loss
+- **Correlation Analysis**: Reconstructed correlations should approach real data correlations
 
 ## License
 
-[Your License] 
+[Specify your license here] 

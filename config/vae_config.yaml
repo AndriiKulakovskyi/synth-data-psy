@@ -1,39 +1,24 @@
-# VAE Training Configuration
-
-data:
-  train_data_path: FACE/neuropsy_v0_partial_n_cols_60.csv
-  test_size: 0.25
-  cardinality_threshold: 7
-  transform: false
-  scaling_strategy: null
-  cat_encoding: null
+# Refactored VAE Training Configuration - Integrated with New Preprocessing Pipeline
 
 model:
   num_layers: 2
-  d_token: 4
+  d_token: 16
   n_head: 1
   factor: 32
   token_bias: true
 
 training:
   batch_size: 512
-  num_epochs: 300
-  learning_rate: 1e-3
+  num_epochs: 400
+  learning_rate: 0.001
   weight_decay: 0
   beta:
-    max: 1e-2
-    min: 1e-4
-    decay_factor: 0.7
-  early_stopping_patience: 10
+    min: 0.001
+    max: 0.15
+  early_stopping_patience: 400
   scheduler_patience: 10
   scheduler_factor: 0.95
 
-paths:
-  checkpoint_dir: ckpt
-  model_filename: model.pt
-  encoder_filename: encoder.pt
-  decoder_filename: decoder.pt
-  embeddings_filename: train_z.npy
-
-device: auto  # 'auto', 'cpu', 'cuda:N' or 'mps'
+correlation_freq: 5
+checkpoint_dir: ckpt
 seed: 42 
