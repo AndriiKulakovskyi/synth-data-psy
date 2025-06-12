@@ -129,6 +129,7 @@ synth-data-psy/
 │   └── vae_config.yaml             # Training configuration
 ├── preprocessing.py                # Data preprocessing pipeline
 ├── train_vae.py                    # Main training script
+├── generate_synthetic_data.py      # Synthetic data generation script
 ├── requirements.txt                # Python dependencies
 └── README.md                       # This file
 ```
@@ -221,12 +222,23 @@ where:
 
 ### Outputs
 
+#### Training Outputs
+
 After training, the following artifacts are generated:
 
-- **Model Checkpoints**: Complete model state for resuming training
+- **Model Checkpoints**: Complete model state for resuming training (`ckpt/best_model.pt`)
 - **Best Model**: Best performing model based on validation loss
-- **TensorBoard Logs**: Comprehensive training metrics and visualizations
+- **TensorBoard Logs**: Comprehensive training metrics and visualizations (`runs/`)
 - **Correlation Analysis**: Heatmaps comparing real vs reconstructed data correlations
+
+#### Synthetic Data Generation Outputs
+
+When using `generate_synthetic_data.py`, the following files are created:
+
+- **`synthetic_data_original_scale.csv`**: Synthetic data transformed back to original scales and units
+- **`synthetic_data_transformed_scale.csv`**: Synthetic data in the same scale as training (normalized/encoded)
+- **`correlation_comparison.png`**: Side-by-side correlation heatmaps (original vs synthetic vs difference)
+- **`generation_metadata.json`**: Complete metadata including model config, feature info, and generation parameters
 
 ## Advanced Usage
 
@@ -250,9 +262,34 @@ numerical_imputed, categorical_imputed = impute_missing_data(
 )
 ```
 
-### Model Sampling
+### Synthetic Data Generation
 
-After training, generate synthetic samples:
+After training, use the dedicated script to generate synthetic data with comprehensive analysis:
+
+```bash
+# Basic synthetic data generation
+python generate_synthetic_data.py --checkpoint ckpt/best_model.pt --data_folder FACE/processed --num_samples 1000
+
+# Custom output folder and device
+python generate_synthetic_data.py \
+    --checkpoint ckpt/best_model.pt \
+    --data_folder DATA/processed \
+    --num_samples 5000 \
+    --output_folder my_synthetic_data \
+    --device cuda:0
+```
+
+This script provides:
+- **Automatic model and data loading** from preprocessing pipeline
+- **Synthetic sample generation** using the trained VAE
+- **Correlation analysis** with side-by-side heatmaps comparing real vs synthetic data
+- **Inverse transformation** back to original data scales
+- **Proper column ordering** matching the original dataset
+- **Multiple output formats** (original scale, transformed scale, metadata)
+
+#### Manual Sampling (Advanced)
+
+For custom applications, generate samples programmatically:
 
 ```python
 from src.ldm.vae.model import VAE

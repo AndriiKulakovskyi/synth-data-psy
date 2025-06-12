@@ -1,0 +1,39 @@
+# Refactored VAE Training Configuration - Integrated with New Preprocessing Pipeline
+
+data:
+  drop_columns: ['usubjid_neuropsychologie', 'visitnum_neuropsychologie', 'visit_neuropsychologie']
+  threshold_nan_columns: 25
+  threshold_nan_rows: 25
+  numerical_min_conversion_rate: 0.6
+  categorical_threshold: 10
+
+  imputation:
+    numerical_strategy: 'median'
+    categorical_strategy: 'most_frequent'
+    knn_neighbors: 5
+    
+  save_transforms: true
+  save_folder: 'FACE/processed/'
+
+model:
+  num_layers: 2
+  d_token: 64
+  n_head: 1
+  factor: 32
+  token_bias: true
+
+training:
+  batch_size: 512
+  num_epochs: 400
+  learning_rate: 0.001
+  weight_decay: 0
+  beta:
+    min: 0.0001
+    max: 0.05
+  early_stopping_patience: 400
+  scheduler_patience: 10
+  scheduler_factor: 0.95
+
+correlation_freq: 5
+checkpoint_dir: ckpt
+seed: 42 

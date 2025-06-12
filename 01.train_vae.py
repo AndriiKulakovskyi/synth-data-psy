@@ -57,32 +57,16 @@ def main():
     parser = argparse.ArgumentParser(description='Refactored VAE Training with Integrated Preprocessing')
     parser.add_argument('--data_folder', type=str, default='FACE/processed',
                         help='Path to folder with preprocessed data')
-    parser.add_argument('--config', type=str, default='config/vae_config.yaml',
+    parser.add_argument('--config', type=str, default='config/config.yaml',
                         help='Path to configuration file')
     parser.add_argument('--device', type=str, default='auto',
                         help='Device to use (auto, cpu, cuda, mps)')
-    parser.add_argument('--batch_size', type=int, help='Override batch size')
-    parser.add_argument('--epochs', type=int, help='Override number of epochs')
-    parser.add_argument('--correlation_freq', type=int, help='Frequency for correlation analysis logging')
     
     args = parser.parse_args()
     
     # Load configuration
-    if Path(args.config).exists():
-        config = load_config(args.config)
-        print(f"Loaded config from {args.config}")
-    
-    # Override config with command line arguments
-    if args.batch_size:
-        config['training']['batch_size'] = args.batch_size
-    if args.epochs:
-        config['training']['num_epochs'] = args.epochs
-    if args.correlation_freq:
-        if 'logging' not in config:
-            config['logging'] = {}
-        config['logging']['correlation_freq'] = args.correlation_freq
-    
-    print("Final configuration:")
+    config = load_config(args.config)
+    print("Configuration:")
     print(json.dumps(config, indent=2))
     
     # Initialize trainer

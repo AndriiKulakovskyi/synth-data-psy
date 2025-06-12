@@ -245,6 +245,68 @@ class VAETrainer:
             'accuracy': torch.tensor(accuracy)
         }
     
+    def generate_synthetic_data_and_log_correlation(self, epoch: int, num_samples: int = 1000) -> None:
+        """Generate synthetic data from latent space and log correlation matrix."""
+        self.model.eval()
+        
+        with torch.no_grad():
+            # Generate synthetic data using the model's sample method
+            synthetic_num, synthetic_cat = self.model.sample(num_samples, self.device)
+            
+            # Convert to numpy
+            synthetic_num_np = synthetic_num.cpu().numpy()
+            
+            # Convert categorical logits to predictions
+            synthetic_cat_predictions = []
+            for cat_logits in synthetic_cat:
+                if cat_logits is not None:
+                    pred = cat_logits.argmax(dim=-1).cpu().numpy()
+                    synthetic_cat_predictions.append(pred)
+            
+            # Combine numerical and categorical data
+            if synthetic_cat_predictions:
+                synthetic_cat_np = np.column_stack(synthetic_cat_predictions)
+                synthetic_combined = np.hstack([synthetic_num_np, synthetic_cat_np])
+                
+                # Create column names
+                num_cols = [f'num_{i}' for i in range(synthetic_num_np.shape[1])]
+                cat_cols = [f'cat_{i}' for i in range(synthetic_cat_np.shape[1])]
+                all_cols = num_cols + cat_cols
+            else:
+                synthetic_combined = synthetic_num_np
+                all_cols = [f'num_{i}' for i in range(synthetic_num_np.shape[1])]
+            
+            # Create DataFrame and compute correlation
+            synthetic_df = pd.DataFrame(synthetic_combined, columns=all_cols)
+            synthetic_corr = synthetic_df.corr(method='pearson')
+            
+            # Create correlation plot
+            plt.figure(figsize=(12, 10))
+            sns.heatmap(synthetic_corr, annot=False, cmap='coolwarm', center=0, 
+                       square=True, cbar_kws={'shrink': 0.8})
+            plt.title(f'Synthetic Data Correlation Matrix (Epoch {epoch+1})')
+            plt.xlabel('Features')
+            plt.ylabel('Features')
+            plt.tight_layout()
+            
+            # Log to TensorBoard
+            self.writer.add_figure('Synthetic_Data_Correlation', plt.gcf(), epoch)
+            
+            plt.close()
+            
+            # Log some statistics about the synthetic data
+            synthetic_stats = {
+                'mean': synthetic_combined.mean(axis=0).mean(),
+                'std': synthetic_combined.std(axis=0).mean(),
+                'min': synthetic_combined.min(axis=0).mean(),
+                'max': synthetic_combined.max(axis=0).mean()
+            }
+            
+            for stat_name, stat_value in synthetic_stats.items():
+                self.writer.add_scalar(f'Synthetic_Stats/{stat_name}', stat_value, epoch)
+            
+            print(f"Synthetic data correlation matrix logged for epoch {epoch+1}")
+    
     def log_correlation_analysis(self, epoch: int) -> None:
         """Compute and log correlation analysis between real and reconstructed data."""
         if self.categorical_info is None:
@@ -435,6 +497,15 @@ class VAETrainer:
         # Log to TensorBoard
         for key, value in avg_losses.items():
             self.writer.add_scalar(f'Val/{key}', value, epoch)
+
+        # Generate synthetic data and log correlation at each epoch
+        print(f"Generating synthetic data correlation analysis at epoch {epoch+1}...")
+        self.generate_synthetic_data_and_log_correlation(epoch)
+
+        # Correlation analysis logging (real vs reconstructed)
+        if (epoch + 1) % self.correlation_log_freq == 0:
+            print(f"Computing real vs reconstructed correlation analysis at epoch {epoch+1}...")
+            self.log_correlation_analysis(epoch)
         
         return avg_losses
     
@@ -466,10 +537,7 @@ class VAETrainer:
             else:
                 patience_counter += 1
             
-            # Correlation analysis logging
-            if (epoch + 1) % self.correlation_log_freq == 0:
-                print(f"Computing correlation analysis at epoch {epoch+1}...")
-                self.log_correlation_analysis(epoch)
+
             
             # Regular checkpoint
             if (epoch + 1) % 10 == 0:

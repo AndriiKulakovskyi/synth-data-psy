@@ -9,6 +9,8 @@ __pycache__/
 # Logs and outputs
 logs/
 runs/
+FACE/processed/
+ckpt/
 *.log
 *.log.*
 

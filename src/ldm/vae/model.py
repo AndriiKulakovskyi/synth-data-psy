@@ -41,17 +41,33 @@ class VAE(nn.Module):
         x_num_rec, x_cat_rec = self.decoder(z[:, 1:])
         return x_num_rec, x_cat_rec, mu_z, logvar_z
 
-    def sample(self, num_samples, current_device):
-        # Sample from standard normal distribution in the latent space
-        # The latent space has dimensions: (batch_size, n_tokens, d_token)
-        # where n_tokens = d_numerical + len(categories) + 1 (for CLS token)
-        n_tokens = self.d_numerical + len(self.categories) + 1
+    # def sample(self, num_samples, current_device):
+    #     # Sample from standard normal distribution in the latent space
+    #     # The latent space has dimensions: (batch_size, n_tokens, d_token)
+    #     # where n_tokens = d_numerical + len(categories) + 1 (for CLS token)
+    #     n_tokens = self.d_numerical + len(self.categories) + 1
         
-        # Sample from standard normal distribution (matching the prior that KL loss encourages)
-        z = torch.randn(num_samples, n_tokens, self.d_token).to(current_device)
+    #     # Sample from standard normal distribution (matching the prior that KL loss encourages)
+    #     z = torch.randn(num_samples, n_tokens, self.d_token).to(current_device)
         
-        # Remove CLS token before decoding (decoder expects inputs without CLS token)
-        z_without_cls = z[:, 1:]  # Remove the first token (CLS)
+    #     # Remove CLS token before decoding (decoder expects inputs without CLS token)
+    #     z_without_cls = z[:, 1:]  # Remove the first token (CLS)
         
+    #     return self.decoder(z_without_cls)
+
+    def sample(self, num_samples, current_device, posterior_loader=None):
+        if posterior_loader is None:
+            # fall back to pure prior
+            z = torch.randn(num_samples, self.d_numerical + len(self.categories) + 1, self.d_token, device=current_device)
+            z_without_cls = z[:, 1:]  # Remove the first token (CLS)
+        else:
+            mus = []
+            for x_num, x_cat in posterior_loader:
+                mu, _ = self.encoder(x_num.to(current_device), x_cat.to(current_device))
+                mus.append(mu.detach())
+            mus = torch.cat(mus)
+            choice = torch.randint(0, mus.size(0), (num_samples,))
+            z = mus[choice] + torch.randn_like(mus[choice]) * 0.3   # small noise
+            z_without_cls = z[:, 1:]  # Remove the first token (CLS)
         return self.decoder(z_without_cls)
 
